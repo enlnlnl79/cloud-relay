@@ -12,8 +12,10 @@ npm run build    # production build (tsc + esbuild)
 
 ## Install ke vault
 
-Copy `main.js`, `manifest.json`, `styles.css` ke `<vault>/.obsidian/plugins/cloud-relay/`, enable di Settings → Community Plugins.
+**Manual (tes):** build dulu (`npm run build`), lalu copy `main.js`, `manifest.json`, `styles.css` ke `<vault>/.obsidian/plugins/cloud-relay/` → enable di Settings → Community Plugins.
 
-Nanti: BRAT (beta, auto-update) → Community Store (publik).
+**BRAT (auto-update, rekomendasi saat beta):** install plugin BRAT → "Add beta plugin" → masukkan `enlnlnl79/cloud-relay` → BRAT mengambil asset dari GitHub Releases dan auto-update saat ada release baru.
+
+Community Store: menyusul setelah stabil.
 
 Server: https://github.com/… db-cloud-relay
