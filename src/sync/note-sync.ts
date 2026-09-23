@@ -26,6 +26,13 @@ export class NoteSyncManager {
   private applyingRemoteByPath = new Set<string>();
   private conn: Conn | null = null;
   private suspended = false;
+  private applySerial: Promise<void> = Promise.resolve();
+
+  private queueApply(noteId: string, update: Uint8Array) {
+    this.applySerial = this.applySerial
+      .then(() => this.applyRemote(noteId, update))
+      .catch((e) => console.error("cloud-relay apply gagal:", e));
+  }
 
   constructor(
     private app: App,
@@ -119,11 +126,11 @@ export class NoteSyncManager {
   }
 
   onSyncStep2(noteId: string, update: Uint8Array) {
-    this.applyRemote(noteId, update);
+    this.queueApply(noteId, update);
   }
 
   onUpdate(noteId: string, update: Uint8Array) {
-    this.applyRemote(noteId, update);
+    this.queueApply(noteId, update);
   }
 
   onFileModify(file: TFile, content: string) {
@@ -199,6 +206,7 @@ export class NoteSyncManager {
 
   private async applyRemote(noteId: string, update: Uint8Array) {
     if (this.suspended) return;
+    await new Promise((r) => setTimeout(r, 0));
     await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
     const entry = this.docs.get(noteId);
     if (!entry) return;
