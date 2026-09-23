@@ -7,6 +7,7 @@ type Mode = "create" | "join";
 export class CloudRelaySettingTab extends PluginSettingTab {
   plugin: CloudRelayPlugin;
   private mode: Mode = "create";
+  private step = 0;
   private joinLink = "";
 
   constructor(app: App, plugin: CloudRelayPlugin) {
@@ -24,43 +25,56 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       return;
     }
 
-    this.renderSetup(containerEl);
+    if (this.step === 0) this.renderRoleStep(containerEl);
+    else if (this.step === 1) {
+      if (this.mode === "create") this.renderServerStep(containerEl);
+      else this.renderJoinStep(containerEl);
+    } else {
+      this.renderTokenStep(containerEl);
+    }
   }
 
-  private renderSetup(containerEl: HTMLElement) {
+  private backButton(containerEl: HTMLElement) {
+    new Setting(containerEl).addButton((btn) =>
+      btn.setButtonText("← Kembali").onClick(() => {
+        this.step = Math.max(0, this.step - 1);
+        this.display();
+      })
+    );
+  }
+
+  private renderRoleStep(containerEl: HTMLElement) {
+    containerEl.createEl("h3", { text: "Langkah 1 dari 2 — Peran device ini" });
     containerEl.createEl("p", {
-      text: "Setup device ini. Pilih salah satu — device pertama membuat sync baru, device berikutnya gabung pakai link.",
+      text: "Vault yang akan disinkronkan: " + this.app.vault.getName(),
     });
 
     new Setting(containerEl)
-      .setName("Peran device ini")
-      .setDesc(
-        this.mode === "create"
-          ? "Device pertama: membuat sync baru di server, lalu membagikan link ke device lain."
-          : "Device lain: gabung ke sync yang sudah dibuat device pertama."
-      )
-      .addButton((btn) => {
-        btn.setButtonText("Device pertama");
-        if (this.mode === "create") btn.setCta().setDisabled(true);
-        btn.onClick(() => {
+      .setName("Device pertama")
+      .setDesc("Device ini membuat sync baru di server, lalu membagikan link ke device lain.")
+      .addButton((btn) =>
+        btn.setButtonText("Pilih").setCta().onClick(() => {
           this.mode = "create";
+          this.step = 1;
           this.display();
-        });
-      })
-      .addButton((btn) => {
-        btn.setButtonText("Device lain (gabung)");
-        if (this.mode === "join") btn.setCta().setDisabled(true);
-        btn.onClick(() => {
-          this.mode = "join";
-          this.display();
-        });
-      });
+        })
+      );
 
-    if (this.mode === "create") this.renderCreate(containerEl);
-    else this.renderJoin(containerEl);
+    new Setting(containerEl)
+      .setName("Device lain (gabung)")
+      .setDesc("Device ini gabung ke sync yang sudah dibuat device pertama, cukup pakai invite link.")
+      .addButton((btn) =>
+        btn.setButtonText("Pilih").onClick(() => {
+          this.mode = "join";
+          this.step = 1;
+          this.display();
+        })
+      );
   }
 
-  private renderCreate(containerEl: HTMLElement) {
+  private renderServerStep(containerEl: HTMLElement) {
+    containerEl.createEl("h3", { text: "Langkah 2 dari 3 — Alamat server" });
+
     new Setting(containerEl)
       .setName("Server URL")
       .setDesc("Alamat DB Cloud Relay-mu. Contoh format: https://relay.domainkamu.com (tanpa garis miring di akhir).")
@@ -74,10 +88,30 @@ export class CloudRelaySettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl).addButton((btn) =>
+      btn.setButtonText("Lanjut →").setCta().onClick(() => {
+        if (!this.plugin.settings.serverUrl) {
+          new Notice("Cloud Relay: isi Server URL dulu.");
+          return;
+        }
+        this.step = 2;
+        this.display();
+      })
+    );
+
+    this.backButton(containerEl);
+  }
+
+  private renderTokenStep(containerEl: HTMLElement) {
+    containerEl.createEl("h3", { text: "Langkah 3 dari 3 — Kunci server" });
+    containerEl.createEl("p", {
+      text: `Vault yang akan disinkronkan: ${this.app.vault.getName()} → ${this.plugin.settings.serverUrl}`,
+    });
+
     new Setting(containerEl)
       .setName("Admin token")
       .setDesc(
-        "Kunci admin server, dicetak sekali di log server saat pertama kali dijalankan: `docker compose logs | grep token`. Dipakai HANYA di device pertama untuk membuat vault, tidak perlu di device lain."
+        "Kunci admin server, dicetak sekali di log server: docker compose logs | grep 'admin token'. Hanya dibutuhkan device pertama."
       )
       .addText((text) =>
         text
@@ -91,22 +125,25 @@ export class CloudRelaySettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Buat sync vault")
-      .setDesc("Daftarkan vault Obsidian ini ke server sebagai sync baru.")
+      .setDesc("Daftarkan vault ini ke server. Setelah berhasil, akan muncul link untuk device lain.")
       .addButton((btn) =>
-        btn
-          .setButtonText("Buat sekarang")
-          .setCta()
-          .onClick(async () => {
-            await this.plugin.createVault();
-            this.display();
-          })
+        btn.setButtonText("Buat sekarang").setCta().onClick(async () => {
+          if (await this.plugin.createVault()) this.display();
+        })
       );
+
+    this.backButton(containerEl);
   }
 
-  private renderJoin(containerEl: HTMLElement) {
+  private renderJoinStep(containerEl: HTMLElement) {
+    containerEl.createEl("h3", { text: "Langkah 2 dari 2 — Invite link" });
+    containerEl.createEl("p", {
+      text: "Vault yang akan disinkronkan: " + this.app.vault.getName(),
+    });
+
     new Setting(containerEl)
       .setName("Invite link")
-      .setDesc("Tempel invite link dari device pertama (device pertama: tombol 'Bagikan link ke device lain').")
+      .setDesc("Tempel invite link dari device pertama (di device pertama: tombol 'Copy invite link').")
       .addText((text) =>
         text
           .setPlaceholder("cloudrelay://join#…")
@@ -117,33 +154,29 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl).addButton((btn) =>
-      btn
-        .setButtonText("Gabung")
-        .setCta()
-        .onClick(async () => {
-          const parsed = parseInviteLink(this.joinLink);
-          if (!parsed) {
-            new Notice("Cloud Relay: link tidak valid. Pastikan diawali cloudrelay://join#");
-            return;
-          }
-          this.plugin.settings.serverUrl = parsed.serverUrl;
-          this.plugin.settings.vaultId = parsed.vaultId;
-          this.plugin.settings.vaultToken = parsed.vaultToken;
-          this.plugin.settings.enabled = true;
-          await this.plugin.saveSettings();
-          new Notice("Cloud Relay: bergabung ✓");
-          this.plugin.startSync();
-          this.display();
-        })
+      btn.setButtonText("Gabung").setCta().onClick(async () => {
+        const parsed = parseInviteLink(this.joinLink);
+        if (!parsed) {
+          new Notice("Cloud Relay: link tidak valid. Pastikan diawali cloudrelay://join#");
+          return;
+        }
+        this.plugin.settings.serverUrl = parsed.serverUrl;
+        this.plugin.settings.vaultId = parsed.vaultId;
+        this.plugin.settings.vaultToken = parsed.vaultToken;
+        this.plugin.settings.enabled = true;
+        await this.plugin.saveSettings();
+        new Notice("Cloud Relay: bergabung ✓");
+        this.plugin.startSync();
+        this.display();
+      })
     );
+
+    this.backButton(containerEl);
   }
 
   private renderConnected(containerEl: HTMLElement) {
     containerEl.createEl("p", {
-      text: `Terhubung ke server: ${this.plugin.settings.serverUrl}`,
-    });
-    containerEl.createEl("p", {
-      text: `ID vault: ${this.plugin.settings.vaultId}`,
+      text: `Vault: ${this.app.vault.getName()} — terhubung ke ${this.plugin.settings.serverUrl}`,
     });
 
     new Setting(containerEl)
@@ -172,17 +205,15 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       .setName("Putuskan dari server")
       .setDesc("Hapus koneksi di device ini. Catatan lokal tidak dihapus.")
       .addButton((btn) =>
-        btn
-          .setButtonText("Disconnect")
-          .setWarning()
-          .onClick(async () => {
-            this.plugin.stopSync();
-            this.plugin.settings.vaultId = "";
-            this.plugin.settings.vaultToken = "";
-            this.plugin.settings.enabled = false;
-            await this.plugin.saveSettings();
-            this.display();
-          })
+        btn.setButtonText("Disconnect").setWarning().onClick(async () => {
+          this.plugin.stopSync();
+          this.plugin.settings.vaultId = "";
+          this.plugin.settings.vaultToken = "";
+          this.plugin.settings.enabled = false;
+          await this.plugin.saveSettings();
+          this.step = 0;
+          this.display();
+        })
       );
   }
 }

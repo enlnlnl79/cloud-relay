@@ -95,14 +95,14 @@ export default class CloudRelayPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async createVault() {
+  async createVault(): Promise<boolean> {
     if (!this.settings.serverUrl) {
       new Notice("Cloud Relay: isi Server URL dulu.");
-      return;
+      return false;
     }
     if (!this.settings.adminToken) {
       new Notice("Cloud Relay: isi Admin token dulu (dari log server).");
-      return;
+      return false;
     }
     try {
       const res = await requestUrl({
@@ -117,8 +117,17 @@ export default class CloudRelayPlugin extends Plugin {
       await this.saveSettings();
       new Notice("Cloud Relay: vault berhasil dibuat ✓");
       this.startSync();
+      return true;
     } catch (e) {
-      new Notice(`Cloud Relay: gagal membuat vault (${e})`);
+      const msg = `${e}`;
+      if (msg.includes("401")) {
+        new Notice(
+          "Cloud Relay: admin token salah/belum diisi. Ambil dari server: docker compose logs | grep 'admin token'"
+        );
+      } else {
+        new Notice(`Cloud Relay: tidak bisa menghubungi server (${msg}). Cek Server URL & tunnel.`);
+      }
+      return false;
     }
   }
 
