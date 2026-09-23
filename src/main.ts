@@ -189,6 +189,10 @@ export default class CloudRelayPlugin extends Plugin {
     return this.syncManager?.diagnostic() ?? { localNoteIds: [], pathById: {} };
   }
 
+  async rescanVault() {
+    await this.syncManager?.init();
+  }
+
   async resetServerVault(): Promise<boolean> {
     try {
       await requestUrl({

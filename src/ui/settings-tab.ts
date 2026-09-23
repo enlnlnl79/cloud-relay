@@ -365,30 +365,43 @@ export class CloudRelaySettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Cek sinkronisasi")
-      .setDesc("Bandingkan jumlah catatan di device ini dengan yang ada di server.")
+      .setDesc("Bandingkan jumlah file di vault, yang terdaftar di sync, dan yang ada di server.")
       .addButton((btn) =>
         btn.setButtonText("Cek sekarang").onClick(async () => {
           new Notice("Cloud Relay: memeriksa…");
-          const serverIds = await this.plugin.fetchVaultNoteIds();
+          const vaultFiles = this.app.vault.getMarkdownFiles();
           const local = this.plugin.syncDiagnostic();
-          if (serverIds === null) {
-            new Notice("Cloud Relay: server tidak menjawab (perlu update server terbaru?)");
-            return;
-          }
-          const serverSet = new Set(serverIds);
+          const indexedPaths = new Set(Object.values(local.pathById));
+          const belumTerdaftar = vaultFiles.filter((f) => !indexedPaths.has(f.path));
+          const serverIds = await this.plugin.fetchVaultNoteIds();
+          const serverCount = serverIds === null ? "?" : serverIds.length;
+          const serverSet = new Set(serverIds ?? []);
           const localSet = new Set(local.localNoteIds);
           const belumTerkirim = local.localNoteIds.filter((id) => !serverSet.has(id));
-          const belumDiterima = serverIds.filter((id) => !localSet.has(id));
-          const sampel = belumTerkirim
+          const belumDiterima = (serverIds ?? []).filter((id) => !localSet.has(id));
+          const sampel = belumTerdaftar
             .slice(0, 3)
-            .map((id) => local.pathById[id])
-            .filter(Boolean)
+            .map((f) => f.path)
             .join(", ");
           new Notice(
-            `Cloud Relay — lokal: ${local.localNoteIds.length}, server: ${serverIds.length}, belum terkirim ke server: ${belumTerkirim.length}${sampel ? ` (${sampel}…)` : ""}, belum diterima dari server: ${belumDiterima.length}`,
-            10000
+            `Cloud Relay — vault: ${vaultFiles.length}, terdaftar: ${local.localNoteIds.length}, server: ${serverCount}, belum terdaftar: ${belumTerdaftar.length}${sampel ? ` (${sampel}…)` : ""}, belum terkirim: ${belumTerkirim.length}, belum diterima: ${belumDiterima.length}`,
+            12000
           );
           this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Pindai ulang vault")
+      .setDesc("Daftarkan file yang belum masuk sync (misal setelah update plugin).")
+      .addButton((btn) =>
+        btn.setButtonText("Pindai").onClick(async () => {
+          btn.setDisabled(true);
+          btn.setButtonText("Memindai…");
+          await this.plugin.rescanVault();
+          btn.setDisabled(false);
+          btn.setButtonText("Pindai");
+          new Notice("Cloud Relay: pemindaian selesai ✓");
         })
       );
 
