@@ -8,3 +8,10 @@
 .status-bar-item[data-status="offline"] {
   color: var(--text-error);
 }
+
+.cloud-relay-warning {
+  color: var(--text-error);
+  border: 1px solid var(--text-error);
+  border-radius: 6px;
+  padding: 8px 12px;
+}

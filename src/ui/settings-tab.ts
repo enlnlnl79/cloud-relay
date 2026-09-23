@@ -16,10 +16,28 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  private otherSyncPluginActive(): string | null {
+    const app = this.app as unknown as {
+      plugins?: { enabledPlugins?: Set<string> };
+    };
+    const enabled = app.plugins?.enabledPlugins;
+    if (enabled?.has("obsidian-livesync")) return "Self-hosted LiveSync";
+    if (enabled?.has("remotely-save")) return "Remotely Save";
+    return null;
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Cloud Relay" });
+
+    const other = this.otherSyncPluginActive();
+    if (other) {
+      containerEl.createEl("p", {
+        text: `⚠️ ${other} terdeteksi aktif di vault ini. Matikan dulu (Settings → Community Plugins) — dua plugin sync berjalan bersamaan akan saling bentrok (file kembali setelah dihapus, note terduplikat).`,
+        cls: "cloud-relay-warning",
+      });
+    }
 
     if (this.plugin.settings.vaultId) {
       this.renderConnected(containerEl);
