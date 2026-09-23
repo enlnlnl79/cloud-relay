@@ -16,6 +16,12 @@ interface DocEntry {
   lastPath: string;
 }
 
+const BACKUP_PREFIX = "Cloud Relay Backup ";
+
+export function isSyncablePath(path: string): boolean {
+  return !path.startsWith(BACKUP_PREFIX) && path.endsWith(".md");
+}
+
 export class NoteSyncManager {
   private index: Record<string, NoteIndex> = {};
   private docs = new Map<string, DocEntry>();
@@ -31,7 +37,7 @@ export class NoteSyncManager {
   async init() {
     await this.store.ensureDir();
     this.index = await this.store.readIndex();
-    const files = this.vault.getMarkdownFiles();
+    const files = this.vault.getMarkdownFiles().filter((f) => isSyncablePath(f.path));
     for (const file of files) {
       let noteId = this.findNoteIdByPath(file.path);
       if (!noteId) {
@@ -109,7 +115,7 @@ export class NoteSyncManager {
   }
 
   onFileModify(file: TFile, content: string) {
-    if (file.extension !== "md") return;
+    if (!isSyncablePath(file.path)) return;
     if (this.applyingRemoteByPath.has(file.path)) return;
     let noteId = this.findNoteIdByPath(file.path);
     if (!noteId) {
@@ -135,12 +141,12 @@ export class NoteSyncManager {
   }
 
   onFileCreate(file: TFile, content: string) {
-    if (file.extension !== "md") return;
+    if (!isSyncablePath(file.path)) return;
     this.onFileModify(file, content);
   }
 
   onFileDelete(file: TFile) {
-    if (file instanceof TFile && file.extension !== "md") return;
+    if (!isSyncablePath(file.path)) return;
     const path = file.path;
     if (this.applyingRemoteByPath.has(path)) return;
     const noteId = this.findNoteIdByPath(path);
@@ -157,7 +163,7 @@ export class NoteSyncManager {
   }
 
   onFileRename(file: TFile, oldPath: string) {
-    if (file instanceof TFile && file.extension !== "md") return;
+    if (!isSyncablePath(file.path)) return;
     if (
       this.applyingRemoteByPath.has(oldPath) ||
       this.applyingRemoteByPath.has(file.path)
