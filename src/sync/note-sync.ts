@@ -16,10 +16,8 @@ interface DocEntry {
   lastPath: string;
 }
 
-const BACKUP_PREFIX = "Cloud Relay Backup ";
-
 export function isSyncablePath(path: string): boolean {
-  return !path.startsWith(BACKUP_PREFIX) && path.endsWith(".md");
+  return path.endsWith(".md");
 }
 
 export class NoteSyncManager {

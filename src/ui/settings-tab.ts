@@ -23,6 +23,9 @@ export class CloudRelaySettingTab extends PluginSettingTab {
   private joinLink = "";
   private joinReady: { serverUrl: string; vaultId: string; vaultToken: string } | null = null;
   private joinInfo: { lastUpdate: number; notes: number } | null | "error" = null;
+  private showDanger = false;
+  private resetArmed = false;
+  private disconnectArmed = false;
 
   constructor(app: App, plugin: CloudRelayPlugin) {
     super(app, plugin);
@@ -43,6 +46,9 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Cloud Relay" });
+    containerEl.createEl("p", {
+      text: `Versi plugin: ${this.plugin.manifest.version}`,
+    });
 
     const other = this.otherSyncPluginActive();
     if (other) {
@@ -387,31 +393,74 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Reset server vault")
-      .setDesc(
-        "Menghapus SEMUA catatan di server untuk vault ini, lalu mengunggah ulang isi vault dari device ini. Setelah ini, device lain HARUS join ulang dengan 'Ikuti device pertama (ganti total)'. Gunakan ini bila device lain pernah gabung dengan isi yang salah."
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Reset server").setWarning().onClick(async () => {
-          if (await this.plugin.resetServerVault()) {
-            new Notice("Cloud Relay: server di-reset, mengunggah ulang dari device ini…");
-          }
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Putuskan dari server")
-      .setDesc("Hapus koneksi di device ini. Catatan lokal tidak dihapus.")
-      .addButton((btn) =>
-        btn.setButtonText("Disconnect").setWarning().onClick(async () => {
-          this.plugin.stopSync();
-          this.plugin.settings.vaultId = "";
-          this.plugin.settings.vaultToken = "";
-          this.plugin.settings.enabled = false;
-          await this.plugin.saveSettings();
-          this.step = 0;
+      .setName("Opsi berbahaya")
+      .setDesc("Tampilkan tombol Reset server & Disconnect. Hanya aktifkan saat benar-benar dibutuhkan.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.showDanger).onChange((value) => {
+          this.showDanger = value;
+          this.resetArmed = false;
+          this.disconnectArmed = false;
           this.display();
         })
       );
+
+    if (this.showDanger) {
+      new Setting(containerEl)
+        .setName("Reset server vault")
+        .setDesc(
+          "Menghapus SEMUA catatan di server untuk vault ini, lalu mengunggah ulang isi vault dari device ini. Setelah ini, device lain HARUS join ulang dengan 'Ikuti device pertama (ganti total)'."
+        )
+        .addButton((btn) => {
+          btn.setButtonText(this.resetArmed ? "YAKIN? Klik lagi untuk reset" : "Reset server");
+          btn.setWarning();
+          btn.onClick(async () => {
+            if (!this.resetArmed) {
+              this.resetArmed = true;
+              this.display();
+              window.setTimeout(() => {
+                if (this.resetArmed) {
+                  this.resetArmed = false;
+                  this.display();
+                }
+              }, 5000);
+              return;
+            }
+            this.resetArmed = false;
+            if (await this.plugin.resetServerVault()) {
+              new Notice("Cloud Relay: server di-reset, mengunggah ulang dari device ini…");
+            }
+            this.display();
+          });
+        });
+
+      new Setting(containerEl)
+        .setName("Putuskan dari server")
+        .setDesc("Hapus koneksi di device ini. Catatan lokal tidak dihapus.")
+        .addButton((btn) => {
+          btn.setButtonText(this.disconnectArmed ? "YAKIN? Klik lagi untuk disconnect" : "Disconnect");
+          btn.setWarning();
+          btn.onClick(async () => {
+            if (!this.disconnectArmed) {
+              this.disconnectArmed = true;
+              this.display();
+              window.setTimeout(() => {
+                if (this.disconnectArmed) {
+                  this.disconnectArmed = false;
+                  this.display();
+                }
+              }, 5000);
+              return;
+            }
+            this.disconnectArmed = false;
+            this.plugin.stopSync();
+            this.plugin.settings.vaultId = "";
+            this.plugin.settings.vaultToken = "";
+            this.plugin.settings.enabled = false;
+            await this.plugin.saveSettings();
+            this.step = 0;
+            this.display();
+          });
+        });
+    }
   }
 }
