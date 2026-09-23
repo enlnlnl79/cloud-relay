@@ -189,8 +189,19 @@ export default class CloudRelayPlugin extends Plugin {
     return this.syncManager?.diagnostic() ?? { localNoteIds: [], pathById: {} };
   }
 
+  private scanning = false;
+
   async rescanVault() {
-    await this.syncManager?.init();
+    if (this.scanning) {
+      new Notice("Cloud Relay: pemindaian sedang berjalan, tunggu selesai…");
+      return;
+    }
+    this.scanning = true;
+    try {
+      await this.syncManager?.init(true);
+    } finally {
+      this.scanning = false;
+    }
   }
 
   async resetServerVault(): Promise<boolean> {

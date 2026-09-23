@@ -1,4 +1,4 @@
-import { App, TFile, Vault } from "obsidian";
+import { App, Notice, TFile, Vault } from "obsidian";
 import * as Y from "yjs";
 
 import { encodeFrame, MSG_SYNC_STEP1, MSG_SYNC_STEP2, MSG_UPDATE } from "./protocol";
@@ -33,10 +33,11 @@ export class NoteSyncManager {
     private store: SyncStore
   ) {}
 
-  async init() {
+  async init(showProgress = false) {
     await this.store.ensureDir();
     this.index = await this.store.readIndex();
     const files = this.vault.getMarkdownFiles().filter((f) => isSyncablePath(f.path));
+    let i = 0;
     for (const file of files) {
       let noteId = this.findNoteIdByPath(file.path);
       if (!noteId) {
@@ -56,6 +57,13 @@ export class NoteSyncManager {
         });
         entry.lastContent = content;
         await this.store.writeBlob(noteId, Y.encodeStateAsUpdate(entry.doc));
+      }
+      i++;
+      if (showProgress && i % 25 === 0) {
+        new Notice(`Cloud Relay: memindai ${i}/${files.length}…`);
+      }
+      if (i % 10 === 0) {
+        await new Promise((r) => setTimeout(r, 0));
       }
     }
     await this.store.writeIndex(this.index);
