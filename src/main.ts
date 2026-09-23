@@ -131,16 +131,41 @@ export default class CloudRelayPlugin extends Plugin {
     }
   }
 
+  private async ensureFolder(path: string) {
+    const parts = path.split("/").filter(Boolean);
+    let cur = "";
+    for (const part of parts) {
+      cur = cur ? `${cur}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(cur))) {
+        await this.app.vault.createFolder(cur);
+      }
+    }
+  }
+
   async backupLocalNotes(): Promise<number> {
     const d = new Date();
     const pad = (n: number) => `${n}`.padStart(2, "0");
     const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
     const folder = `Cloud Relay Backup ${stamp}`;
     const files = this.app.vault.getMarkdownFiles();
+    if (files.length === 0) return 0;
+    await this.ensureFolder(folder);
+    let moved = 0;
+    const failed: string[] = [];
     for (const file of files) {
-      await this.app.fileManager.renameFile(file, `${folder}/${file.path}`);
+      try {
+        const targetDir = `${folder}/${file.parent?.path ?? ""}`.replace(/\/$/, "");
+        await this.ensureFolder(targetDir);
+        await this.app.vault.rename(file, `${folder}/${file.path}`);
+        moved++;
+      } catch {
+        failed.push(file.path);
+      }
     }
-    return files.length;
+    if (failed.length > 0) {
+      new Notice(`Cloud Relay: ${failed.length} file gagal dibackup (${failed[0]} dsb)`);
+    }
+    return moved;
   }
 
   async resetLocalSync() {

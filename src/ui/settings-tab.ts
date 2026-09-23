@@ -46,7 +46,7 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     this.plugin.settings.vaultToken = parsed.vaultToken;
     this.plugin.settings.enabled = true;
     await this.plugin.saveSettings();
-    new Notice("Cloud Relay: bergabung ✓");
+    new Notice("Cloud Relay: bergabung ✓ Sinkron dimulai…");
     this.plugin.startSync();
     this.display();
   }
@@ -205,10 +205,20 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       )
       .addButton((btn) =>
         btn.setButtonText("Backup & ikuti").setCta().onClick(async () => {
-          const moved = await this.plugin.backupLocalNotes();
-          await this.plugin.resetLocalSync();
-          new Notice(`Cloud Relay: ${moved} catatan dibackup ke folder 'Cloud Relay Backup …'`);
-          await this.finalizeJoin();
+          btn.setDisabled(true);
+          btn.setButtonText("Memproses…");
+          try {
+            const count = this.app.vault.getMarkdownFiles().length;
+            new Notice(`Cloud Relay: membackup ${count} catatan…`);
+            const moved = await this.plugin.backupLocalNotes();
+            await this.plugin.resetLocalSync();
+            new Notice(`Cloud Relay: ${moved} catatan dibackup ✓ Sinkron dimulai…`);
+            await this.finalizeJoin();
+          } catch (e) {
+            new Notice(`Cloud Relay: backup gagal — ${e}`);
+            btn.setDisabled(false);
+            btn.setButtonText("Backup & ikuti");
+          }
         })
       );
 
