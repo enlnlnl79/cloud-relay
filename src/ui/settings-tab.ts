@@ -331,8 +331,8 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     });
     containerEl.createEl("p", {
       text: this.plugin.settings.isPrimary
-        ? "★ Device ini: SUMBER UTAMA (device pertama — kiblat sinkron)"
-        : "Device ini: pengikut (mengikuti device utama)",
+        ? "★ Device ini: SUMBER PERTAMA (device yang pertama join — kiblat sinkron)"
+        : "Device ini: pengikut (mengikuti sumber pertama)",
     });
 
     new Setting(containerEl)
