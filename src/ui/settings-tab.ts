@@ -195,29 +195,31 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     const count = this.app.vault.getMarkdownFiles().length;
     containerEl.createEl("h3", { text: "Peringatan — vault ini tidak kosong" });
     containerEl.createEl("p", {
-      text: `Vault "${this.app.vault.getName()}" berisi ${count} catatan. Sinkron akan menyesuaikan vault ini dengan isi vault di device pertama — pilih cara penanganannya.`,
+      text: `Vault "${this.app.vault.getName()}" berisi ${count} catatan. Pilih cara menyesuaikan dengan vault device pertama.`,
+    });
+    containerEl.createEl("p", {
+      text: "⚠️ Opsi 'Ikuti device pertama' akan MENGOSONGKAN vault ini lalu mengisinya dari device pertama. Backup manual dulu kalau ada catatan penting di sini (misal copy folder vault lewat aplikasi Files / Finder).",
     });
 
     new Setting(containerEl)
-      .setName("Ikuti device pertama")
+      .setName("Ikuti device pertama (ganti total)")
       .setDesc(
-        "Semua catatan lokal dipindahkan dulu ke folder 'Cloud Relay Backup <tanggal>' (aman, bisa dipulihkan), lalu isi vault disamakan 100% dengan device pertama."
+        "Vault ini dikosongkan, lalu diisi ulang persis mengikuti device pertama. Pastikan sudah backup manual — catatan di sini akan hilang dari vault ini."
       )
       .addButton((btn) =>
-        btn.setButtonText("Backup & ikuti").setCta().onClick(async () => {
+        btn.setButtonText("Kosongkan & ikuti").setCta().onClick(async () => {
           btn.setDisabled(true);
           btn.setButtonText("Memproses…");
           try {
-            const count = this.app.vault.getMarkdownFiles().length;
-            new Notice(`Cloud Relay: membackup ${count} catatan…`);
-            const moved = await this.plugin.backupLocalNotes();
+            new Notice(`Cloud Relay: mengosongkan ${count} catatan…`);
+            const moved = await this.plugin.wipeLocalVault();
             await this.plugin.resetLocalSync();
-            new Notice(`Cloud Relay: ${moved} catatan dibackup ✓ Sinkron dimulai…`);
+            new Notice(`Cloud Relay: ${moved} catatan dikosongkan ✓ Sinkron dimulai…`);
             await this.finalizeJoin();
           } catch (e) {
-            new Notice(`Cloud Relay: backup gagal — ${e}`);
+            new Notice(`Cloud Relay: gagal — ${e}`);
             btn.setDisabled(false);
-            btn.setButtonText("Backup & ikuti");
+            btn.setButtonText("Kosongkan & ikuti");
           }
         })
       );

@@ -27,6 +27,7 @@ export class NoteSyncManager {
   private docs = new Map<string, DocEntry>();
   private applyingRemoteByPath = new Set<string>();
   private conn: Conn | null = null;
+  private suspended = false;
 
   constructor(
     private app: App,
@@ -75,6 +76,10 @@ export class NoteSyncManager {
     this.conn = conn;
   }
 
+  suspend() {
+    this.suspended = true;
+  }
+
   async reset() {
     this.index = {};
     this.docs.clear();
@@ -82,13 +87,14 @@ export class NoteSyncManager {
     await this.store.archive();
     await this.store.ensureDir();
     await this.store.writeIndex(this.index);
+    this.suspended = false;
   }
 
-  onDocList(noteIds: string[]) {
+  async onDocList(noteIds: string[]) {
     for (const id of noteIds) {
       if (!this.docs.has(id)) {
         this.index[id] = this.index[id] ?? { path: "", deleted: false };
-        this.ensureDoc(id, this.index[id].path);
+        await this.ensureDoc(id, this.index[id].path);
       }
       const entry = this.docs.get(id);
       if (entry && this.conn) {
@@ -96,7 +102,7 @@ export class NoteSyncManager {
         this.conn.send(encodeFrame(MSG_SYNC_STEP1, id, new Uint8Array(sv)));
       }
     }
-    this.store.writeIndex(this.index);
+    await this.store.writeIndex(this.index);
   }
 
   onSyncStep1(noteId: string, sv: Uint8Array) {
@@ -115,6 +121,7 @@ export class NoteSyncManager {
   }
 
   onFileModify(file: TFile, content: string) {
+    if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
     if (this.applyingRemoteByPath.has(file.path)) return;
     let noteId = this.findNoteIdByPath(file.path);
@@ -146,6 +153,7 @@ export class NoteSyncManager {
   }
 
   onFileDelete(file: TFile) {
+    if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
     const path = file.path;
     if (this.applyingRemoteByPath.has(path)) return;
@@ -163,6 +171,7 @@ export class NoteSyncManager {
   }
 
   onFileRename(file: TFile, oldPath: string) {
+    if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
     if (
       this.applyingRemoteByPath.has(oldPath) ||
@@ -183,6 +192,7 @@ export class NoteSyncManager {
   }
 
   private async applyRemote(noteId: string, update: Uint8Array) {
+    if (this.suspended) return;
     await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
     const entry = this.docs.get(noteId);
     if (!entry) return;
@@ -223,6 +233,7 @@ export class NoteSyncManager {
         });
       }
       if (finalPath) {
+        await this.ensureParentFolders(finalPath);
         this.applyingRemoteByPath.add(finalPath);
         await this.vault.create(finalPath, newContent);
         this.applyingRemoteByPath.delete(finalPath);
@@ -237,6 +248,7 @@ export class NoteSyncManager {
     if (existingPath !== newPath && newPath) {
       const file = this.vault.getAbstractFileByPath(existingPath);
       if (file instanceof TFile) {
+        await this.ensureParentFolders(newPath);
         this.applyingRemoteByPath.add(newPath);
         await this.vault.rename(file, newPath);
         this.applyingRemoteByPath.delete(newPath);
@@ -294,6 +306,18 @@ export class NoteSyncManager {
       if (entry.path === path && !entry.deleted) return id;
     }
     return null;
+  }
+
+  private async ensureParentFolders(path: string) {
+    const parent = path.split("/").slice(0, -1).filter(Boolean);
+    if (parent.length === 0) return;
+    let cur = "";
+    for (const part of parent) {
+      cur = cur ? `${cur}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(cur))) {
+        await this.app.vault.createFolder(cur);
+      }
+    }
   }
 }
 
