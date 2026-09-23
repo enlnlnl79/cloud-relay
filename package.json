@@ -1,6 +1,6 @@
 {
   "name": "cloud-relay",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Obsidian sync plugin powered by CRDT",
   "main": "main.js",
   "scripts": {

@@ -222,19 +222,23 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Ikuti device pertama (ganti total)")
       .setDesc(
-        "Vault ini dikosongkan, lalu diisi ulang persis mengikuti device pertama. Pastikan sudah backup manual — catatan di sini akan hilang dari vault ini."
+        "Vault ini dikosongkan, lalu diisi ulang persis mengikuti device pertama. Pastikan sudah backup manual — catatan di sini akan hilang dari vault ini. Jika device ini pernah gabung sebelumnya, minta device pertama menekan 'Reset server vault' dulu supaya catatan lama tidak ikut kembali dari server."
       )
       .addButton((btn) =>
         btn.setButtonText("Kosongkan & ikuti").setCta().onClick(async () => {
           btn.setDisabled(true);
           btn.setButtonText("Memproses…");
-          try {
-            new Notice(`Cloud Relay: mengosongkan ${count} catatan…`);
-            const moved = await this.plugin.wipeLocalVault();
-            await this.plugin.resetLocalSync();
+        try {
+          new Notice(`Cloud Relay: mengosongkan ${count} catatan…`);
+          const { moved, failed } = await this.plugin.wipeLocalVault();
+          await this.plugin.resetLocalSync();
+          if (failed > 0) {
+            new Notice(`Cloud Relay: ${moved} dikosongkan, ${failed} GAGAL (${failed} file masih di vault)`);
+          } else {
             new Notice(`Cloud Relay: ${moved} catatan dikosongkan ✓ Sinkron dimulai…`);
-            await this.finalizeJoin();
-          } catch (e) {
+          }
+          await this.finalizeJoin();
+        } catch (e) {
             new Notice(`Cloud Relay: gagal — ${e}`);
             btn.setDisabled(false);
             btn.setButtonText("Kosongkan & ikuti");
@@ -280,6 +284,19 @@ export class CloudRelaySettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           if (value) this.plugin.startSync();
           else this.plugin.stopSync();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Reset server vault")
+      .setDesc(
+        "Menghapus SEMUA catatan di server untuk vault ini, lalu mengunggah ulang isi vault dari device ini. Setelah ini, device lain HARUS join ulang dengan 'Ikuti device pertama (ganti total)'. Gunakan ini bila device lain pernah gabung dengan isi yang salah."
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Reset server").setWarning().onClick(async () => {
+          if (await this.plugin.resetServerVault()) {
+            new Notice("Cloud Relay: server di-reset, mengunggah ulang dari device ini…");
+          }
         })
       );
 

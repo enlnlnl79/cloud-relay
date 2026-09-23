@@ -131,22 +131,42 @@ export default class CloudRelayPlugin extends Plugin {
     }
   }
 
-  async wipeLocalVault(): Promise<number> {
+  async wipeLocalVault(): Promise<{ moved: number; failed: number }> {
     const files = this.app.vault.getMarkdownFiles();
     let moved = 0;
+    let failed = 0;
     for (const file of files) {
       try {
-        if (typeof this.app.fileManager.trashFile === "function") {
-          await this.app.fileManager.trashFile(file);
-        } else {
-          await this.app.vault.trash(file, true);
+        try {
+          if (typeof this.app.fileManager.trashFile === "function") {
+            await this.app.fileManager.trashFile(file);
+          } else {
+            await this.app.vault.trash(file, true);
+          }
+        } catch {
+          await this.app.vault.delete(file, true);
         }
         moved++;
       } catch {
-        // lanjutkan file berikutnya
+        failed++;
       }
     }
-    return moved;
+    return { moved, failed };
+  }
+
+  async resetServerVault(): Promise<boolean> {
+    try {
+      await requestUrl({
+        url: `${this.settings.serverUrl.replace(/\/$/, "")}/v1/vaults/${this.settings.vaultId}/reset?token=${encodeURIComponent(this.settings.vaultToken)}`,
+        method: "POST",
+      });
+      this.stopSync();
+      this.startSync();
+      return true;
+    } catch (e) {
+      new Notice(`Cloud Relay: reset server gagal (${e})`);
+      return false;
+    }
   }
 
   async resetLocalSync() {
