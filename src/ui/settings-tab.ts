@@ -9,6 +9,7 @@ export class CloudRelaySettingTab extends PluginSettingTab {
   private mode: Mode = "create";
   private step = 0;
   private joinLink = "";
+  private joinReady: { serverUrl: string; vaultId: string; vaultToken: string } | null = null;
 
   constructor(app: App, plugin: CloudRelayPlugin) {
     super(app, plugin);
@@ -29,15 +30,32 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     else if (this.step === 1) {
       if (this.mode === "create") this.renderServerStep(containerEl);
       else this.renderJoinStep(containerEl);
-    } else {
+    } else if (this.step === 2) {
       this.renderTokenStep(containerEl);
+    } else if (this.step === 3) {
+      this.renderWarningStep(containerEl);
     }
+  }
+
+  private async finalizeJoin() {
+    if (!this.joinReady) return;
+    const parsed = this.joinReady;
+    this.joinReady = null;
+    this.plugin.settings.serverUrl = parsed.serverUrl;
+    this.plugin.settings.vaultId = parsed.vaultId;
+    this.plugin.settings.vaultToken = parsed.vaultToken;
+    this.plugin.settings.enabled = true;
+    await this.plugin.saveSettings();
+    new Notice("Cloud Relay: bergabung ✓");
+    this.plugin.startSync();
+    this.display();
   }
 
   private backButton(containerEl: HTMLElement) {
     new Setting(containerEl).addButton((btn) =>
       btn.setButtonText("← Kembali").onClick(() => {
-        this.step = Math.max(0, this.step - 1);
+        if (this.mode === "join" && this.step > 1) this.step = 1;
+        else this.step = Math.max(0, this.step - 1);
         this.display();
       })
     );
@@ -160,16 +178,50 @@ export class CloudRelaySettingTab extends PluginSettingTab {
           new Notice("Cloud Relay: link tidak valid. Pastikan diawali cloudrelay://join#");
           return;
         }
-        this.plugin.settings.serverUrl = parsed.serverUrl;
-        this.plugin.settings.vaultId = parsed.vaultId;
-        this.plugin.settings.vaultToken = parsed.vaultToken;
-        this.plugin.settings.enabled = true;
-        await this.plugin.saveSettings();
-        new Notice("Cloud Relay: bergabung ✓");
-        this.plugin.startSync();
+        this.joinReady = parsed;
+        if (this.app.vault.getMarkdownFiles().length === 0) {
+          await this.finalizeJoin();
+          return;
+        }
+        this.step = 3;
         this.display();
       })
     );
+
+    this.backButton(containerEl);
+  }
+
+  private renderWarningStep(containerEl: HTMLElement) {
+    const count = this.app.vault.getMarkdownFiles().length;
+    containerEl.createEl("h3", { text: "Peringatan — vault ini tidak kosong" });
+    containerEl.createEl("p", {
+      text: `Vault "${this.app.vault.getName()}" berisi ${count} catatan. Sinkron akan menyesuaikan vault ini dengan isi vault di device pertama — pilih cara penanganannya.`,
+    });
+
+    new Setting(containerEl)
+      .setName("Ikuti device pertama")
+      .setDesc(
+        "Semua catatan lokal dipindahkan dulu ke folder 'Cloud Relay Backup <tanggal>' (aman, bisa dipulihkan), lalu isi vault disamakan 100% dengan device pertama."
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Backup & ikuti").setCta().onClick(async () => {
+          const moved = await this.plugin.backupLocalNotes();
+          await this.plugin.resetLocalSync();
+          new Notice(`Cloud Relay: ${moved} catatan dibackup ke folder 'Cloud Relay Backup …'`);
+          await this.finalizeJoin();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Gabungkan")
+      .setDesc(
+        "Catatan lokal ikut tersinkron ke device lain (merge). File yang namanya sama tapi isinya beda diselamatkan dua-duanya: versi device lain dinamai '… (konflik dari device lain).md'."
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Gabungkan").onClick(async () => {
+          await this.finalizeJoin();
+        })
+      );
 
     this.backButton(containerEl);
   }

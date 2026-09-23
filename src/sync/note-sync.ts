@@ -69,6 +69,15 @@ export class NoteSyncManager {
     this.conn = conn;
   }
 
+  async reset() {
+    this.index = {};
+    this.docs.clear();
+    this.applyingRemoteByPath.clear();
+    await this.store.archive();
+    await this.store.ensureDir();
+    await this.store.writeIndex(this.index);
+  }
+
   onDocList(noteIds: string[]) {
     for (const id of noteIds) {
       if (!this.docs.has(id)) {
@@ -200,15 +209,22 @@ export class NoteSyncManager {
     }
 
     if (!idx || idx.deleted || !existingPath) {
-      if (newPath) {
-        this.applyingRemoteByPath.add(newPath);
-        await this.vault.create(newPath, newContent);
-        this.applyingRemoteByPath.delete(newPath);
-        this.index[noteId] = { path: newPath, deleted: false };
+      let finalPath = newPath;
+      if (finalPath && this.vault.getAbstractFileByPath(finalPath) instanceof TFile) {
+        finalPath = finalPath.replace(/(\.md)$/i, " (konflik dari device lain)$1");
+        entry.doc.transact(() => {
+          entry.meta.set("path", finalPath);
+        });
+      }
+      if (finalPath) {
+        this.applyingRemoteByPath.add(finalPath);
+        await this.vault.create(finalPath, newContent);
+        this.applyingRemoteByPath.delete(finalPath);
+        this.index[noteId] = { path: finalPath, deleted: false };
       }
       await this.store.writeIndex(this.index);
       entry.lastContent = newContent;
-      entry.lastPath = newPath;
+      entry.lastPath = finalPath;
       return;
     }
 

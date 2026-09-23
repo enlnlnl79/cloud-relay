@@ -131,6 +131,22 @@ export default class CloudRelayPlugin extends Plugin {
     }
   }
 
+  async backupLocalNotes(): Promise<number> {
+    const d = new Date();
+    const pad = (n: number) => `${n}`.padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
+    const folder = `Cloud Relay Backup ${stamp}`;
+    const files = this.app.vault.getMarkdownFiles();
+    for (const file of files) {
+      await this.app.fileManager.renameFile(file, `${folder}/${file.path}`);
+    }
+    return files.length;
+  }
+
+  async resetLocalSync() {
+    await this.syncManager?.reset();
+  }
+
   startSync() {
     if (!this.syncManager) return;
     this.connection = new RelayConnection(
