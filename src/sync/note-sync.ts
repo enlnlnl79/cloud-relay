@@ -301,6 +301,18 @@ export class NoteSyncManager {
     this.docs.set(noteId, entry);
   }
 
+  diagnostic(): { localNoteIds: string[]; pathById: Record<string, string> } {
+    const localNoteIds: string[] = [];
+    const pathById: Record<string, string> = {};
+    for (const [id, idx] of Object.entries(this.index)) {
+      if (!idx.deleted) {
+        localNoteIds.push(id);
+        pathById[id] = idx.path;
+      }
+    }
+    return { localNoteIds, pathById };
+  }
+
   private findNoteIdByPath(path: string): string | null {
     for (const [id, entry] of Object.entries(this.index)) {
       if (entry.path === path && !entry.deleted) return id;

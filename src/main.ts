@@ -172,6 +172,23 @@ export default class CloudRelayPlugin extends Plugin {
     }
   }
 
+  async fetchVaultNoteIds(): Promise<string[] | null> {
+    try {
+      const res = await requestUrl({
+        url: `${this.settings.serverUrl.replace(/\/$/, "")}/v1/vaults/${this.settings.vaultId}/ids?token=${encodeURIComponent(this.settings.vaultToken)}`,
+        method: "GET",
+      });
+      const body = res.json as { note_ids: string[] };
+      return body.note_ids;
+    } catch {
+      return null;
+    }
+  }
+
+  syncDiagnostic() {
+    return this.syncManager?.diagnostic() ?? { localNoteIds: [], pathById: {} };
+  }
+
   async resetServerVault(): Promise<boolean> {
     try {
       await requestUrl({

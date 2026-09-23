@@ -358,6 +358,35 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Cek sinkronisasi")
+      .setDesc("Bandingkan jumlah catatan di device ini dengan yang ada di server.")
+      .addButton((btn) =>
+        btn.setButtonText("Cek sekarang").onClick(async () => {
+          new Notice("Cloud Relay: memeriksa…");
+          const serverIds = await this.plugin.fetchVaultNoteIds();
+          const local = this.plugin.syncDiagnostic();
+          if (serverIds === null) {
+            new Notice("Cloud Relay: server tidak menjawab (perlu update server terbaru?)");
+            return;
+          }
+          const serverSet = new Set(serverIds);
+          const localSet = new Set(local.localNoteIds);
+          const belumTerkirim = local.localNoteIds.filter((id) => !serverSet.has(id));
+          const belumDiterima = serverIds.filter((id) => !localSet.has(id));
+          const sampel = belumTerkirim
+            .slice(0, 3)
+            .map((id) => local.pathById[id])
+            .filter(Boolean)
+            .join(", ");
+          new Notice(
+            `Cloud Relay — lokal: ${local.localNoteIds.length}, server: ${serverIds.length}, belum terkirim ke server: ${belumTerkirim.length}${sampel ? ` (${sampel}…)` : ""}, belum diterima dari server: ${belumDiterima.length}`,
+            10000
+          );
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Reset server vault")
       .setDesc(
         "Menghapus SEMUA catatan di server untuk vault ini, lalu mengunggah ulang isi vault dari device ini. Setelah ini, device lain HARUS join ulang dengan 'Ikuti device pertama (ganti total)'. Gunakan ini bila device lain pernah gabung dengan isi yang salah."
