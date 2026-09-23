@@ -1,0 +1,10 @@
+.status-bar-item[data-status="synced"] {
+  color: var(--text-success);
+}
+.status-bar-item[data-status="syncing"],
+.status-bar-item[data-status="connecting"] {
+  color: var(--text-warning);
+}
+.status-bar-item[data-status="offline"] {
+  color: var(--text-error);
+}

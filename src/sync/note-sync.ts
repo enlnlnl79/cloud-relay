@@ -1,0 +1,293 @@
+import { App, TFile, Vault } from "obsidian";
+import * as Y from "yjs";
+
+import { encodeFrame, MSG_SYNC_STEP1, MSG_SYNC_STEP2, MSG_UPDATE } from "./protocol";
+import { NoteIndex, SyncStore } from "./persist";
+
+export interface Conn {
+  send: (frame: Uint8Array) => void;
+}
+
+interface DocEntry {
+  doc: Y.Doc;
+  text: Y.Text;
+  meta: Y.Map<unknown>;
+  lastContent: string;
+  lastPath: string;
+}
+
+export class NoteSyncManager {
+  private index: Record<string, NoteIndex> = {};
+  private docs = new Map<string, DocEntry>();
+  private applyingRemoteByPath = new Set<string>();
+  private conn: Conn | null = null;
+
+  constructor(
+    private app: App,
+    private vault: Vault,
+    private store: SyncStore
+  ) {}
+
+  async init() {
+    await this.store.ensureDir();
+    this.index = await this.store.readIndex();
+    const files = this.vault.getMarkdownFiles();
+    for (const file of files) {
+      let noteId = this.findNoteIdByPath(file.path);
+      if (!noteId) {
+        noteId = crypto.randomUUID();
+        this.index[noteId] = { path: file.path, deleted: false };
+      }
+      await this.ensureDoc(noteId, file.path);
+      const content = await this.vault.read(file);
+      const entry = this.docs.get(noteId);
+      if (entry && content !== entry.lastContent) {
+        const d = diffText(entry.lastContent, content);
+        entry.doc.transact(() => {
+          if (d.del > 0) entry.text.delete(d.retain, d.del);
+          if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
+          entry.meta.set("path", file.path);
+          entry.meta.set("deleted", false);
+        });
+        entry.lastContent = content;
+        await this.store.writeBlob(noteId, Y.encodeStateAsUpdate(entry.doc));
+      }
+    }
+    await this.store.writeIndex(this.index);
+  }
+
+  sendSyncSteps(conn: Conn) {
+    for (const [id, entry] of this.docs) {
+      if (entry.meta.get("path") || entry.text.length > 0) {
+        const sv = Y.encodeStateVector(entry.doc);
+        conn.send(encodeFrame(MSG_SYNC_STEP1, id, new Uint8Array(sv)));
+      }
+    }
+  }
+
+  setConn(conn: Conn | null) {
+    this.conn = conn;
+  }
+
+  onDocList(noteIds: string[]) {
+    for (const id of noteIds) {
+      if (!this.docs.has(id)) {
+        this.index[id] = this.index[id] ?? { path: "", deleted: false };
+        this.ensureDoc(id, this.index[id].path);
+      }
+      const entry = this.docs.get(id);
+      if (entry && this.conn) {
+        const sv = Y.encodeStateVector(entry.doc);
+        this.conn.send(encodeFrame(MSG_SYNC_STEP1, id, new Uint8Array(sv)));
+      }
+    }
+    this.store.writeIndex(this.index);
+  }
+
+  onSyncStep1(noteId: string, sv: Uint8Array) {
+    const entry = this.docs.get(noteId);
+    if (!entry || !this.conn) return;
+    const diff = Y.encodeStateAsUpdate(entry.doc, sv);
+    this.conn.send(encodeFrame(MSG_SYNC_STEP2, noteId, diff));
+  }
+
+  onSyncStep2(noteId: string, update: Uint8Array) {
+    this.applyRemote(noteId, update);
+  }
+
+  onUpdate(noteId: string, update: Uint8Array) {
+    this.applyRemote(noteId, update);
+  }
+
+  onFileModify(file: TFile, content: string) {
+    if (file.extension !== "md") return;
+    if (this.applyingRemoteByPath.has(file.path)) return;
+    let noteId = this.findNoteIdByPath(file.path);
+    if (!noteId) {
+      noteId = crypto.randomUUID();
+      this.index[noteId] = { path: file.path, deleted: false };
+      this.store.writeIndex(this.index);
+    }
+    this.ensureDoc(noteId, file.path).then(() => {
+      const entry = this.docs.get(noteId);
+      if (!entry) return;
+      if (content === entry.lastContent) return;
+      const d = diffText(entry.lastContent, content);
+      entry.doc.transact(() => {
+        if (d.del > 0) entry.text.delete(d.retain, d.del);
+        if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
+        entry.meta.set("path", file.path);
+        entry.meta.set("deleted", false);
+      });
+      entry.lastContent = content;
+      entry.lastPath = file.path;
+      this.store.writeIndex(this.index);
+    });
+  }
+
+  onFileCreate(file: TFile, content: string) {
+    if (file.extension !== "md") return;
+    this.onFileModify(file, content);
+  }
+
+  onFileDelete(file: TFile) {
+    if (file instanceof TFile && file.extension !== "md") return;
+    const path = file.path;
+    if (this.applyingRemoteByPath.has(path)) return;
+    const noteId = this.findNoteIdByPath(path);
+    if (!noteId) return;
+    this.ensureDoc(noteId, path).then(() => {
+      const entry = this.docs.get(noteId);
+      if (!entry) return;
+      entry.doc.transact(() => {
+        entry.meta.set("deleted", true);
+      });
+      this.index[noteId].deleted = true;
+      this.store.writeIndex(this.index);
+    });
+  }
+
+  onFileRename(file: TFile, oldPath: string) {
+    if (file instanceof TFile && file.extension !== "md") return;
+    if (
+      this.applyingRemoteByPath.has(oldPath) ||
+      this.applyingRemoteByPath.has(file.path)
+    )
+      return;
+    const noteId = this.findNoteIdByPath(oldPath);
+    if (!noteId) return;
+    this.ensureDoc(noteId, oldPath).then(() => {
+      const entry = this.docs.get(noteId);
+      if (!entry) return;
+      entry.doc.transact(() => {
+        entry.meta.set("path", file.path);
+      });
+      this.index[noteId].path = file.path;
+      this.store.writeIndex(this.index);
+    });
+  }
+
+  private async applyRemote(noteId: string, update: Uint8Array) {
+    await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
+    const entry = this.docs.get(noteId);
+    if (!entry) return;
+    const oldContent = entry.text.toString();
+    const oldPath = entry.meta.get("path") as string | undefined;
+    entry.doc.transact(() => {
+      Y.applyUpdate(entry.doc, update);
+    }, "remote");
+    const newContent = entry.text.toString();
+    const newPath = (entry.meta.get("path") as string | undefined) ?? "";
+    const deleted = (entry.meta.get("deleted") as boolean | undefined) ?? false;
+
+    const idx = this.index[noteId];
+    const existingPath = idx?.path ?? "";
+
+    if (deleted) {
+      if (existingPath) {
+        const file = this.vault.getAbstractFileByPath(existingPath);
+        if (file instanceof TFile) {
+          this.applyingRemoteByPath.add(existingPath);
+          await this.vault.delete(file);
+          this.applyingRemoteByPath.delete(existingPath);
+        }
+      }
+      if (idx) idx.deleted = true;
+      await this.store.writeIndex(this.index);
+      entry.lastContent = "";
+      entry.lastPath = existingPath;
+      return;
+    }
+
+    if (!idx || idx.deleted || !existingPath) {
+      if (newPath) {
+        this.applyingRemoteByPath.add(newPath);
+        await this.vault.create(newPath, newContent);
+        this.applyingRemoteByPath.delete(newPath);
+        this.index[noteId] = { path: newPath, deleted: false };
+      }
+      await this.store.writeIndex(this.index);
+      entry.lastContent = newContent;
+      entry.lastPath = newPath;
+      return;
+    }
+
+    if (existingPath !== newPath && newPath) {
+      const file = this.vault.getAbstractFileByPath(existingPath);
+      if (file instanceof TFile) {
+        this.applyingRemoteByPath.add(newPath);
+        await this.vault.rename(file, newPath);
+        this.applyingRemoteByPath.delete(newPath);
+      }
+      idx.path = newPath;
+      await this.store.writeIndex(this.index);
+      entry.lastContent = newContent;
+      entry.lastPath = newPath;
+      return;
+    }
+
+    if (newContent !== oldContent) {
+      const file = this.vault.getAbstractFileByPath(existingPath);
+      if (file instanceof TFile) {
+        this.applyingRemoteByPath.add(existingPath);
+        await this.vault.modify(file, newContent);
+        this.applyingRemoteByPath.delete(existingPath);
+      }
+    }
+    entry.lastContent = newContent;
+    entry.lastPath = existingPath;
+  }
+
+  private async ensureDoc(noteId: string, path: string) {
+    if (this.docs.has(noteId)) return;
+    const doc = new Y.Doc();
+    const blob = await this.store.readBlob(noteId);
+    if (blob) Y.applyUpdate(doc, blob);
+    const text = doc.getText("content");
+    const meta = doc.getMap<unknown>("meta");
+    if (path && !meta.get("path")) {
+      doc.transact(() => {
+        meta.set("path", path);
+        meta.set("deleted", false);
+      }, "init");
+    }
+    doc.on("update", (update: Uint8Array, origin: unknown) => {
+      if (origin !== "remote") {
+        this.conn?.send(encodeFrame(MSG_UPDATE, noteId, new Uint8Array(update)));
+        this.store.writeBlob(noteId, Y.encodeStateAsUpdate(doc));
+      }
+    });
+    const entry: DocEntry = {
+      doc,
+      text,
+      meta,
+      lastContent: text.toString(),
+      lastPath: path,
+    };
+    this.docs.set(noteId, entry);
+  }
+
+  private findNoteIdByPath(path: string): string | null {
+    for (const [id, entry] of Object.entries(this.index)) {
+      if (entry.path === path && !entry.deleted) return id;
+    }
+    return null;
+  }
+}
+
+function diffText(oldS: string, newS: string): {
+  retain: number;
+  del: number;
+  ins: string;
+} {
+  let s = 0;
+  const min = Math.min(oldS.length, newS.length);
+  while (s < min && oldS[s] === newS[s]) s++;
+  let o = oldS.length;
+  let n = newS.length;
+  while (o > s && n > s && oldS[o - 1] === newS[n - 1]) {
+    o--;
+    n--;
+  }
+  return { retain: s, del: o - s, ins: newS.slice(s, n) };
+}

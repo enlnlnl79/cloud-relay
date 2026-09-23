@@ -1,0 +1,154 @@
+import { Notice, Plugin, requestUrl, TFile } from "obsidian";
+import { CloudRelaySettings, DEFAULT_SETTINGS } from "./settings";
+import { StatusBar } from "./sync/status";
+import { RelayConnection } from "./sync/connection";
+import { NoteSyncManager } from "./sync/note-sync";
+import { SyncStore } from "./sync/persist";
+import { CloudRelaySettingTab } from "./ui/settings-tab";
+
+export default class CloudRelayPlugin extends Plugin {
+  settings: CloudRelaySettings = DEFAULT_SETTINGS;
+  private statusBar: StatusBar | null = null;
+  private connection: RelayConnection | null = null;
+  private syncManager: NoteSyncManager | null = null;
+  private store: SyncStore | null = null;
+
+  async onload() {
+    await this.loadSettings();
+
+    this.statusBar = new StatusBar(this.addStatusBarItem());
+    this.store = new SyncStore(this.app.vault.adapter, `${this.manifest.dir}/sync`);
+    this.syncManager = new NoteSyncManager(this.app, this.app.vault, this.store);
+
+    await this.syncManager.init();
+
+    this.registerVaultEvents();
+
+    this.addRibbonIcon("refresh-cw", "Cloud Relay: sync sekarang", () => {
+      if (this.connection && this.syncManager) {
+        const conn = this.connection;
+        const manager = this.syncManager;
+        manager.onDocList([]);
+        this.onConnectSync();
+        new Notice("Cloud Relay: sync sekarang…");
+      } else {
+        new Notice("Cloud Relay: belum terhubung. Buka Settings → Cloud Relay.");
+      }
+    });
+
+    this.addSettingTab(new CloudRelaySettingTab(this.app, this));
+
+    if (this.settings.enabled && this.settings.vaultId) {
+      this.startSync();
+    }
+  }
+
+  onunload() {
+    this.stopSync();
+  }
+
+  private registerVaultEvents() {
+    const manager = this.syncManager;
+    if (!manager) return;
+
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          this.app.vault.read(file).then((content) => manager.onFileCreate(file, content));
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          this.app.vault.read(file).then((content) => manager.onFileModify(file, content));
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          manager.onFileDelete(file);
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        if (file instanceof TFile && file.extension === "md") {
+          manager.onFileRename(file, oldPath);
+        }
+      })
+    );
+  }
+
+  private onConnectSync() {
+    if (this.connection && this.syncManager) {
+      this.syncManager.sendSyncSteps(this.connection);
+    }
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  async createVault() {
+    if (!this.settings.serverUrl) {
+      new Notice("Cloud Relay: isi Server URL dulu.");
+      return;
+    }
+    if (!this.settings.adminToken) {
+      new Notice("Cloud Relay: isi Admin token dulu (dari log server).");
+      return;
+    }
+    try {
+      const res = await requestUrl({
+        url: `${this.settings.serverUrl.replace(/\/$/, "")}/v1/vaults`,
+        method: "POST",
+        headers: { "x-admin-token": this.settings.adminToken },
+      });
+      const body = res.json as { vault_id: string; token: string };
+      this.settings.vaultId = body.vault_id;
+      this.settings.vaultToken = body.token;
+      this.settings.enabled = true;
+      await this.saveSettings();
+      new Notice("Cloud Relay: vault berhasil dibuat ✓");
+      this.startSync();
+    } catch (e) {
+      new Notice(`Cloud Relay: gagal membuat vault (${e})`);
+    }
+  }
+
+  startSync() {
+    if (!this.syncManager) return;
+    this.connection = new RelayConnection(
+      (status) => this.statusBar?.set(status),
+      {
+        onDocList: (ids) => {
+          this.syncManager?.onDocList(ids);
+          this.onConnectSync();
+        },
+        onSyncStep1: (id, sv) => this.syncManager?.onSyncStep1(id, sv),
+        onSyncStep2: (id, up) => this.syncManager?.onSyncStep2(id, up),
+        onUpdate: (id, up) => this.syncManager?.onUpdate(id, up),
+      }
+    );
+    this.syncManager.setConn(this.connection);
+    this.connection.connect(
+      this.settings.serverUrl,
+      this.settings.vaultId,
+      this.settings.vaultToken
+    );
+  }
+
+  stopSync() {
+    this.syncManager?.setConn(null);
+    this.connection?.disconnect();
+    this.connection = null;
+    this.statusBar?.set("disconnected");
+  }
+}
+
