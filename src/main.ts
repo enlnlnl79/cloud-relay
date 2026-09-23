@@ -113,6 +113,7 @@ export default class CloudRelayPlugin extends Plugin {
       const body = res.json as { vault_id: string; token: string };
       this.settings.vaultId = body.vault_id;
       this.settings.vaultToken = body.token;
+      this.settings.isPrimary = true;
       this.settings.enabled = true;
       await this.saveSettings();
       new Notice("Cloud Relay: vault berhasil dibuat ✓");
@@ -152,6 +153,23 @@ export default class CloudRelayPlugin extends Plugin {
       }
     }
     return { moved, failed };
+  }
+
+  async fetchVaultInfo(
+    serverUrl: string,
+    vaultId: string,
+    vaultToken: string
+  ): Promise<{ lastUpdate: number; notes: number } | null> {
+    try {
+      const res = await requestUrl({
+        url: `${serverUrl.replace(/\/$/, "")}/v1/vaults/${vaultId}/info?token=${encodeURIComponent(vaultToken)}`,
+        method: "GET",
+      });
+      const body = res.json as { last_update: number; notes: number };
+      return { lastUpdate: body.last_update, notes: body.notes };
+    } catch {
+      return null;
+    }
   }
 
   async resetServerVault(): Promise<boolean> {

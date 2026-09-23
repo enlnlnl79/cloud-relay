@@ -3,6 +3,7 @@ export interface CloudRelaySettings {
   vaultId: string;
   vaultToken: string;
   adminToken: string;
+  isPrimary: boolean;
   enabled: boolean;
 }
 
@@ -11,6 +12,7 @@ export const DEFAULT_SETTINGS: CloudRelaySettings = {
   vaultId: "",
   vaultToken: "",
   adminToken: "",
+  isPrimary: false,
   enabled: false,
 };
 

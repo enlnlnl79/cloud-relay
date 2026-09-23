@@ -4,12 +4,25 @@ import { buildInviteLink, parseInviteLink } from "../settings";
 
 type Mode = "create" | "join";
 
+function relativeTimeId(unixSecs: number): string {
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+  if (diff < 60) return "baru saja";
+  const min = Math.floor(diff / 60);
+  if (min < 60) return `${min} menit lalu`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour} jam lalu`;
+  const day = Math.floor(hour / 24);
+  if (day < 30) return `${day} hari lalu`;
+  return new Date(unixSecs * 1000).toLocaleString("id-ID");
+}
+
 export class CloudRelaySettingTab extends PluginSettingTab {
   plugin: CloudRelayPlugin;
   private mode: Mode = "create";
   private step = 0;
   private joinLink = "";
   private joinReady: { serverUrl: string; vaultId: string; vaultToken: string } | null = null;
+  private joinInfo: { lastUpdate: number; notes: number } | null | "error" = null;
 
   constructor(app: App, plugin: CloudRelayPlugin) {
     super(app, plugin);
@@ -52,6 +65,8 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       this.renderTokenStep(containerEl);
     } else if (this.step === 3) {
       this.renderWarningStep(containerEl);
+    } else if (this.step === 4) {
+      this.renderInfoStep(containerEl);
     }
   }
 
@@ -63,6 +78,7 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     this.plugin.settings.vaultId = parsed.vaultId;
     this.plugin.settings.vaultToken = parsed.vaultToken;
     this.plugin.settings.enabled = true;
+    this.plugin.settings.isPrimary = false;
     await this.plugin.saveSettings();
     new Notice("Cloud Relay: bergabung ✓ Sinkron dimulai…");
     this.plugin.startSync();
@@ -197,11 +213,14 @@ export class CloudRelaySettingTab extends PluginSettingTab {
           return;
         }
         this.joinReady = parsed;
-        if (this.app.vault.getMarkdownFiles().length === 0) {
-          await this.finalizeJoin();
-          return;
-        }
-        this.step = 3;
+        new Notice("Cloud Relay: memeriksa data di server…");
+        const info = await this.plugin.fetchVaultInfo(
+          parsed.serverUrl,
+          parsed.vaultId,
+          parsed.vaultToken
+        );
+        this.joinInfo = info ?? "error";
+        this.step = 4;
         this.display();
       })
     );
@@ -260,9 +279,60 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     this.backButton(containerEl);
   }
 
+  private renderInfoStep(containerEl: HTMLElement) {
+    containerEl.createEl("h3", { text: "Konfirmasi data di server" });
+
+    if (this.joinInfo === "error" || this.joinInfo === null) {
+      containerEl.createEl("p", {
+        text: "Tidak bisa membaca info dari server. Pastikan server sudah versi terbaru (git pull && docker compose up -d --build) dan bisa diakses.",
+        cls: "cloud-relay-warning",
+      });
+      new Setting(containerEl).addButton((btn) =>
+        btn.setButtonText("Tetap lanjut gabung").onClick(() => {
+          this.step = this.app.vault.getMarkdownFiles().length > 0 ? 3 : 0;
+          if (this.step === 0) void this.finalizeJoin();
+          else this.display();
+        })
+      );
+    } else {
+      const { lastUpdate, notes } = this.joinInfo;
+      containerEl.createEl("p", {
+        text: `Catatan di server: ${notes} catatan`,
+      });
+      containerEl.createEl("p", {
+        text: `Terakhir diupdate: ${
+          lastUpdate === 0 ? "belum ada data (server masih kosong)" : relativeTimeId(lastUpdate)
+        }`,
+      });
+      containerEl.createEl("p", {
+        text: "Cek tanggal update itu — kalau terasa lama, batalkan dulu, lakukan edit kecil di device pertama supaya datanya segar, lalu gabung lagi.",
+      });
+      new Setting(containerEl)
+        .setName("Lanjut gabung")
+        .setDesc("Tanggal update sudah oke? Lanjutkan.")
+        .addButton((btn) =>
+          btn.setButtonText("Lanjut").setCta().onClick(() => {
+            if (this.app.vault.getMarkdownFiles().length > 0) {
+              this.step = 3;
+              this.display();
+            } else {
+              void this.finalizeJoin();
+            }
+          })
+        );
+    }
+
+    this.backButton(containerEl);
+  }
+
   private renderConnected(containerEl: HTMLElement) {
     containerEl.createEl("p", {
       text: `Vault: ${this.app.vault.getName()} — terhubung ke ${this.plugin.settings.serverUrl}`,
+    });
+    containerEl.createEl("p", {
+      text: this.plugin.settings.isPrimary
+        ? "★ Device ini: SUMBER UTAMA (device pertama — kiblat sinkron)"
+        : "Device ini: pengikut (mengikuti device utama)",
     });
 
     new Setting(containerEl)
