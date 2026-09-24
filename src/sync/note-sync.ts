@@ -20,19 +20,18 @@ export function isSyncablePath(path: string): boolean {
   return path.endsWith(".md");
 }
 
+const PERSIST_DEBOUNCE_MS = 3000;
+
 export class NoteSyncManager {
   private index: Record<string, NoteIndex> = {};
   private docs = new Map<string, DocEntry>();
+  private svCache = new Map<string, Uint8Array>();
   private applyingRemoteByPath = new Set<string>();
   private conn: Conn | null = null;
   private suspended = false;
   private applySerial: Promise<void> = Promise.resolve();
-
-  private queueApply(noteId: string, update: Uint8Array) {
-    this.applySerial = this.applySerial
-      .then(() => this.applyRemote(noteId, update))
-      .catch((e) => console.error("cloud-relay apply gagal:", e));
-  }
+  private persistTimers = new Map<string, number>();
+  private indexTimer: number | null = null;
 
   constructor(
     private app: App,
@@ -43,46 +42,51 @@ export class NoteSyncManager {
   async init(showProgress = false) {
     await this.store.ensureDir();
     this.index = await this.store.readIndex();
+
+    const noteIds = Object.keys(this.index);
+    let j = 0;
+    for (const id of noteIds) {
+      if (!this.index[id].deleted) {
+        const sv = await this.store.readSv(id);
+        if (sv) this.svCache.set(id, sv);
+      }
+      if (++j % 20 === 0) await sleep0();
+    }
+
     const files = this.vault.getMarkdownFiles().filter((f) => isSyncablePath(f.path));
     let i = 0;
     for (const file of files) {
       let noteId = this.findNoteIdByPath(file.path);
       if (!noteId) {
         noteId = crypto.randomUUID();
-        this.index[noteId] = { path: file.path, deleted: false };
+        this.index[noteId] = { path: file.path, deleted: false, mtime: 0 };
       }
-      await this.ensureDoc(noteId, file.path);
-      const content = await this.vault.read(file);
-      const entry = this.docs.get(noteId);
-      if (entry && content !== entry.lastContent) {
-        const d = diffText(entry.lastContent, content);
-        entry.doc.transact(() => {
-          if (d.del > 0) entry.text.delete(d.retain, d.del);
-          if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
-          entry.meta.set("path", file.path);
-          entry.meta.set("deleted", false);
-        });
-        entry.lastContent = content;
-        await this.store.writeBlob(noteId, Y.encodeStateAsUpdate(entry.doc));
+      const idx = this.index[noteId];
+      if (idx.mtime !== file.stat.mtime) {
+        await this.ensureDoc(noteId, file.path);
+        const entry = this.docs.get(noteId);
+        if (entry) {
+          const content = await this.vault.read(file);
+          if (content !== entry.lastContent) {
+            const d = diffText(entry.lastContent, content);
+            entry.doc.transact(() => {
+              if (d.del > 0) entry.text.delete(d.retain, d.del);
+              if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
+              entry.meta.set("path", file.path);
+              entry.meta.set("deleted", false);
+            });
+            entry.lastContent = content;
+          }
+          idx.mtime = file.stat.mtime;
+        }
       }
       i++;
       if (showProgress && i % 25 === 0) {
         new Notice(`Cloud Relay: memindai ${i}/${files.length}…`);
       }
-      if (i % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
+      if (i % 10 === 0) await sleep0();
     }
-    await this.store.writeIndex(this.index);
-  }
-
-  sendSyncSteps(conn: Conn) {
-    for (const [id, entry] of this.docs) {
-      if (entry.meta.get("path") || entry.text.length > 0) {
-        const sv = Y.encodeStateVector(entry.doc);
-        conn.send(encodeFrame(MSG_SYNC_STEP1, id, new Uint8Array(sv)));
-      }
-    }
+    this.scheduleIndexWrite();
   }
 
   setConn(conn: Conn | null) {
@@ -94,8 +98,13 @@ export class NoteSyncManager {
   }
 
   async reset() {
+    for (const t of this.persistTimers.values()) window.clearTimeout(t);
+    this.persistTimers.clear();
+    if (this.indexTimer !== null) window.clearTimeout(this.indexTimer);
+    this.indexTimer = null;
     this.index = {};
     this.docs.clear();
+    this.svCache.clear();
     this.applyingRemoteByPath.clear();
     await this.store.archive();
     await this.store.ensureDir();
@@ -103,26 +112,55 @@ export class NoteSyncManager {
     this.suspended = false;
   }
 
-  async onDocList(noteIds: string[]) {
-    for (const id of noteIds) {
-      if (!this.docs.has(id)) {
-        this.index[id] = this.index[id] ?? { path: "", deleted: false };
+  async flush() {
+    for (const t of this.persistTimers.keys()) {
+      await this.persistNow(t);
+    }
+  }
+
+  async sendSyncSteps(conn: Conn) {
+    const ids = Object.keys(this.index).filter((id) => !this.index[id].deleted);
+    for (const id of ids) {
+      let sv = this.svCache.get(id);
+      if (!sv) {
         await this.ensureDoc(id, this.index[id].path);
+        const entry = this.docs.get(id);
+        if (entry) {
+          sv = new Uint8Array(Y.encodeStateVector(entry.doc));
+          this.svCache.set(id, sv);
+        }
       }
-      const entry = this.docs.get(id);
-      if (entry && this.conn) {
-        const sv = Y.encodeStateVector(entry.doc);
-        this.conn.send(encodeFrame(MSG_SYNC_STEP1, id, new Uint8Array(sv)));
+      if (sv && sv.length > 0 && conn) {
+        conn.send(encodeFrame(MSG_SYNC_STEP1, id, sv));
       }
     }
-    await this.store.writeIndex(this.index);
+  }
+
+  async onDocList(noteIds: string[]) {
+    for (const id of noteIds) {
+      if (!this.index[id]) this.index[id] = { path: "", deleted: false };
+      let sv = this.svCache.get(id);
+      if (!sv) {
+        await this.ensureDoc(id, this.index[id].path);
+        const entry = this.docs.get(id);
+        sv = entry ? new Uint8Array(Y.encodeStateVector(entry.doc)) : new Uint8Array(0);
+        this.svCache.set(id, sv);
+      }
+      if (this.conn) {
+        this.conn.send(encodeFrame(MSG_SYNC_STEP1, id, sv));
+      }
+    }
+    this.scheduleIndexWrite();
   }
 
   onSyncStep1(noteId: string, sv: Uint8Array) {
-    const entry = this.docs.get(noteId);
-    if (!entry || !this.conn) return;
-    const diff = Y.encodeStateAsUpdate(entry.doc, sv);
-    this.conn.send(encodeFrame(MSG_SYNC_STEP2, noteId, diff));
+    void (async () => {
+      await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
+      const entry = this.docs.get(noteId);
+      if (!entry || !this.conn) return;
+      const diff = Y.encodeStateAsUpdate(entry.doc, sv);
+      this.conn.send(encodeFrame(MSG_SYNC_STEP2, noteId, diff));
+    })();
   }
 
   onSyncStep2(noteId: string, update: Uint8Array) {
@@ -133,6 +171,12 @@ export class NoteSyncManager {
     this.queueApply(noteId, update);
   }
 
+  private queueApply(noteId: string, update: Uint8Array) {
+    this.applySerial = this.applySerial
+      .then(() => this.applyRemote(noteId, update))
+      .catch((e) => console.error("cloud-relay apply gagal:", e));
+  }
+
   onFileModify(file: TFile, content: string) {
     if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
@@ -140,13 +184,15 @@ export class NoteSyncManager {
     let noteId = this.findNoteIdByPath(file.path);
     if (!noteId) {
       noteId = crypto.randomUUID();
-      this.index[noteId] = { path: file.path, deleted: false };
-      this.store.writeIndex(this.index);
+      this.index[noteId] = { path: file.path, deleted: false, mtime: 0 };
     }
-    this.ensureDoc(noteId, file.path).then(() => {
-      const entry = this.docs.get(noteId);
-      if (!entry) return;
-      if (content === entry.lastContent) return;
+    const id = noteId;
+    this.index[id].mtime = file.stat.mtime;
+    this.scheduleIndexWrite();
+    void (async () => {
+      await this.ensureDoc(id, file.path);
+      const entry = this.docs.get(id);
+      if (!entry || content === entry.lastContent) return;
       const d = diffText(entry.lastContent, content);
       entry.doc.transact(() => {
         if (d.del > 0) entry.text.delete(d.retain, d.del);
@@ -156,11 +202,11 @@ export class NoteSyncManager {
       });
       entry.lastContent = content;
       entry.lastPath = file.path;
-      this.store.writeIndex(this.index);
-    });
+    })();
   }
 
   onFileCreate(file: TFile, content: string) {
+    if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
     this.onFileModify(file, content);
   }
@@ -172,15 +218,16 @@ export class NoteSyncManager {
     if (this.applyingRemoteByPath.has(path)) return;
     const noteId = this.findNoteIdByPath(path);
     if (!noteId) return;
-    this.ensureDoc(noteId, path).then(() => {
+    this.index[noteId].deleted = true;
+    this.scheduleIndexWrite();
+    void (async () => {
+      await this.ensureDoc(noteId, path);
       const entry = this.docs.get(noteId);
       if (!entry) return;
       entry.doc.transact(() => {
         entry.meta.set("deleted", true);
       });
-      this.index[noteId].deleted = true;
-      this.store.writeIndex(this.index);
-    });
+    })();
   }
 
   onFileRename(file: TFile, oldPath: string) {
@@ -193,25 +240,27 @@ export class NoteSyncManager {
       return;
     const noteId = this.findNoteIdByPath(oldPath);
     if (!noteId) return;
-    this.ensureDoc(noteId, oldPath).then(() => {
+    this.index[noteId].path = file.path;
+    this.index[noteId].mtime = file.stat.mtime;
+    this.scheduleIndexWrite();
+    void (async () => {
+      await this.ensureDoc(noteId, oldPath);
       const entry = this.docs.get(noteId);
       if (!entry) return;
       entry.doc.transact(() => {
         entry.meta.set("path", file.path);
       });
-      this.index[noteId].path = file.path;
-      this.store.writeIndex(this.index);
-    });
+      entry.lastPath = file.path;
+    })();
   }
 
   private async applyRemote(noteId: string, update: Uint8Array) {
     if (this.suspended) return;
-    await new Promise((r) => setTimeout(r, 0));
+    await sleep0();
     await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
     const entry = this.docs.get(noteId);
     if (!entry) return;
     const oldContent = entry.text.toString();
-    const oldPath = entry.meta.get("path") as string | undefined;
     entry.doc.transact(() => {
       Y.applyUpdate(entry.doc, update);
     }, "remote");
@@ -232,9 +281,10 @@ export class NoteSyncManager {
         }
       }
       if (idx) idx.deleted = true;
-      await this.store.writeIndex(this.index);
+      this.scheduleIndexWrite();
       entry.lastContent = "";
       entry.lastPath = existingPath;
+      this.persistDoc(noteId);
       return;
     }
 
@@ -253,9 +303,10 @@ export class NoteSyncManager {
         this.applyingRemoteByPath.delete(finalPath);
         this.index[noteId] = { path: finalPath, deleted: false };
       }
-      await this.store.writeIndex(this.index);
+      this.scheduleIndexWrite();
       entry.lastContent = newContent;
       entry.lastPath = finalPath;
+      this.persistDoc(noteId);
       return;
     }
 
@@ -268,9 +319,10 @@ export class NoteSyncManager {
         this.applyingRemoteByPath.delete(newPath);
       }
       idx.path = newPath;
-      await this.store.writeIndex(this.index);
+      this.scheduleIndexWrite();
       entry.lastContent = newContent;
       entry.lastPath = newPath;
+      this.persistDoc(noteId);
       return;
     }
 
@@ -280,17 +332,26 @@ export class NoteSyncManager {
         this.applyingRemoteByPath.add(existingPath);
         await this.vault.modify(file, newContent);
         this.applyingRemoteByPath.delete(existingPath);
+        idx.mtime = file.stat.mtime;
+        this.scheduleIndexWrite();
       }
     }
     entry.lastContent = newContent;
     entry.lastPath = existingPath;
+    this.persistDoc(noteId);
   }
 
   private async ensureDoc(noteId: string, path: string) {
     if (this.docs.has(noteId)) return;
     const doc = new Y.Doc();
     const blob = await this.store.readBlob(noteId);
-    if (blob) Y.applyUpdate(doc, blob);
+    if (blob) {
+      try {
+        Y.applyUpdate(doc, blob);
+      } catch (e) {
+        console.error("cloud-relay: blob rusak, abaikan", noteId, e);
+      }
+    }
     const text = doc.getText("content");
     const meta = doc.getMap<unknown>("meta");
     if (path && !meta.get("path")) {
@@ -302,8 +363,8 @@ export class NoteSyncManager {
     doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin !== "remote") {
         this.conn?.send(encodeFrame(MSG_UPDATE, noteId, new Uint8Array(update)));
-        this.store.writeBlob(noteId, Y.encodeStateAsUpdate(doc));
       }
+      this.persistDoc(noteId);
     });
     const entry: DocEntry = {
       doc,
@@ -313,6 +374,38 @@ export class NoteSyncManager {
       lastPath: path,
     };
     this.docs.set(noteId, entry);
+    this.svCache.set(noteId, new Uint8Array(Y.encodeStateVector(doc)));
+  }
+
+  private persistDoc(noteId: string) {
+    const prev = this.persistTimers.get(noteId);
+    if (prev !== undefined) window.clearTimeout(prev);
+    const t = window.setTimeout(() => {
+      void this.persistNow(noteId);
+    }, PERSIST_DEBOUNCE_MS);
+    this.persistTimers.set(noteId, t);
+  }
+
+  private async persistNow(noteId: string) {
+    this.persistTimers.delete(noteId);
+    const entry = this.docs.get(noteId);
+    if (!entry) return;
+    const blob = Y.encodeStateAsUpdate(entry.doc);
+    const sv = new Uint8Array(Y.encodeStateVector(entry.doc));
+    this.svCache.set(noteId, sv);
+    try {
+      await this.store.writeBlob(noteId, blob, sv);
+    } catch (e) {
+      console.error("cloud-relay: gagal tulis blob", noteId, e);
+    }
+  }
+
+  private scheduleIndexWrite() {
+    if (this.indexTimer !== null) window.clearTimeout(this.indexTimer);
+    this.indexTimer = window.setTimeout(() => {
+      this.indexTimer = null;
+      void this.store.writeIndex(this.index);
+    }, PERSIST_DEBOUNCE_MS);
   }
 
   diagnostic(): { localNoteIds: string[]; pathById: Record<string, string> } {
@@ -345,6 +438,10 @@ export class NoteSyncManager {
       }
     }
   }
+}
+
+function sleep0() {
+  return new Promise((r) => setTimeout(r, 0));
 }
 
 function diffText(oldS: string, newS: string): {

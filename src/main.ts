@@ -45,6 +45,7 @@ export default class CloudRelayPlugin extends Plugin {
 
   onunload() {
     this.stopSync();
+    void this.syncManager?.flush();
   }
 
   private registerVaultEvents() {
