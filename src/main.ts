@@ -212,7 +212,8 @@ export default class CloudRelayPlugin extends Plugin {
         method: "POST",
       });
       this.stopSync();
-      this.startSync();
+      await this.resetLocalSync();
+      if (this.settings.enabled) this.startSync();
       return true;
     } catch (e) {
       new Notice(`Cloud Relay: reset server gagal (${e})`);
