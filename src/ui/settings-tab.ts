@@ -26,6 +26,7 @@ export class CloudRelaySettingTab extends PluginSettingTab {
   private showDanger = false;
   private resetArmed = false;
   private disconnectArmed = false;
+  private recoverArmed = false;
 
   constructor(app: App, plugin: CloudRelayPlugin) {
     super(app, plugin);
@@ -219,13 +220,24 @@ export class CloudRelaySettingTab extends PluginSettingTab {
           return;
         }
         this.joinReady = parsed;
-        new Notice("Cloud Relay: memeriksa data di server…");
-        const info = await this.plugin.fetchVaultInfo(
+        btn.setButtonText("Memeriksa…");
+        btn.setDisabled(true);
+        const t = await this.plugin.testConnection(
           parsed.serverUrl,
           parsed.vaultId,
           parsed.vaultToken
         );
-        this.joinInfo = info ?? "error";
+        btn.setDisabled(false);
+        btn.setButtonText("Gabung");
+        if (!t.ok) {
+          new Notice(`Cloud Relay: server tidak terjangkau — ${t.message}`, 8000);
+          return;
+        }
+        new Notice(
+          `Cloud Relay: server OK — ${t.notes} catatan, update terakhir ${relativeTimeId(t.lastUpdate ?? 0)}`,
+          8000
+        );
+        this.joinInfo = { lastUpdate: t.lastUpdate ?? 0, notes: t.notes ?? 0 };
         this.step = 4;
         this.display();
       })
@@ -364,6 +376,25 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Sinkronisasi pengaturan (.obsidian)")
+      .setDesc("Sync app.json, appearance, community-plugins, core-plugins, hotkeys, graph, themes, snippets ke semua device.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.hiddenSync !== false).onChange(async (v) => {
+          this.plugin.settings.hiddenSync = v;
+          await this.plugin.saveSettings();
+          this.plugin.applyLimits();
+          if (!v) new Notice("Cloud Relay: sync pengaturan dimatikan (device ini)");
+        })
+      );
+
+    if (this.plugin.settings.hiddenSync !== false) {
+      const hd = this.plugin.hiddenDiagnostic();
+      containerEl.createEl("p", {
+        text: `Pengaturan tersinkron: lokal ${hd.local} file, terdaftar ${hd.meta} file`,
+      });
+    }
+
+    new Setting(containerEl)
       .setName("Batas ukuran catatan (MB)")
       .setDesc("Catatan lebih besar dari ini dilewati. 0 = tanpa batas (semua catatan ikut sync).")
       .addText((text) =>
@@ -433,6 +464,26 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     if (this.showDanger) {
+      new Setting(containerEl)
+        .setName("Pulihkan dari server")
+        .setDesc("Kosongkan catatan lokal + data sync device ini, lalu tarik ulang seluruh isi dari server. Berguna bila data lokal rusak (server tidak diubah).")
+        .addButton((btn) =>
+          btn.setButtonText("Pulihkan").onClick(async () => {
+            if (!this.recoverArmed) {
+              this.recoverArmed = true;
+              btn.setButtonText("YAKIN? Klik lagi");
+              window.setTimeout(() => {
+                this.recoverArmed = false;
+                this.display();
+              }, 5000);
+              return;
+            }
+            this.recoverArmed = false;
+            await this.plugin.recoverFromServer();
+            this.display();
+          })
+        );
+
       new Setting(containerEl)
         .setName("Reset server vault")
         .setDesc(

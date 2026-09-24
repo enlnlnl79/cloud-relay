@@ -21,11 +21,31 @@ export function isSyncablePath(path: string): boolean {
 }
 
 const ATTACH_ID = "__attachments__";
+const HIDDEN_ID = "__hiddens__";
 
 interface AttachMeta {
   sha: string;
   size: number;
   deleted: boolean;
+}
+
+const HIDDEN_FILES = [
+  "app.json",
+  "appearance.json",
+  "community-plugins.json",
+  "core-plugins.json",
+  "hotkeys.json",
+  "graph.json",
+];
+
+const HIDDEN_DIRS = ["themes", "snippets"];
+
+function isHiddenSyncable(path: string): boolean {
+  const parts = path.split("/");
+  return (
+    HIDDEN_FILES.includes(parts[parts.length - 1]) ||
+    HIDDEN_DIRS.includes(parts[0])
+  );
 }
 
 const skipNoticeShown = new Set<string>();
@@ -104,6 +124,7 @@ export class NoteSyncManager {
     await this.store.ensureDir();
     this.index = await this.store.readIndex();
     this.attachSeen = await this.store.readAttachSeen();
+    this.hiddenSeen = await this.store.readHiddenSeen();
 
     const noteIds = Object.keys(this.index);
     let j = 0;
@@ -294,6 +315,209 @@ export class NoteSyncManager {
     })();
   }
 
+  private hiddenSyncEnabled = false;
+  private hiddenSeen: Record<string, { sha: string; mtime: number }> = {};
+  private hiddenReconcileTimer: number | null = null;
+
+  setHiddenSyncEnabled(on: boolean) {
+    this.hiddenSyncEnabled = on;
+    if (!on && this.hiddenReconcileTimer !== null) {
+      window.clearTimeout(this.hiddenReconcileTimer);
+      this.hiddenReconcileTimer = null;
+    }
+  }
+
+  private listHiddenFiles(): { path: string; mtime: number; size: number }[] {
+    const res: { path: string; mtime: number; size: number }[] = [];
+    for (const f of this.vault.getFiles()) {
+      if (!isHiddenSyncable(f.path)) continue;
+      res.push({ path: f.path, mtime: f.stat.mtime, size: f.stat.size });
+    }
+    return res;
+  }
+
+  async initHiddenFiles(showProgress = false) {
+    if (!this.http || !this.hiddenSyncEnabled) return;
+    await this.ensureDoc(HIDDEN_ID, "");
+    const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
+    if (!map) return;
+    let i = 0;
+    const files = this.listHiddenFiles();
+    for (const f of files) {
+      if (this.suspended) return;
+      try {
+        const seen = this.hiddenSeen[f.path];
+        if (seen && seen.mtime === f.mtime) {
+          const entry = map.get(f.path);
+          if (entry && entry.sha === seen.sha && !entry.deleted) continue;
+        }
+        const buf = await this.vault.adapter.readBinary(`.obsidian/${f.path}`);
+        const sha = await sha256Hex(buf);
+        const entry = map.get(f.path);
+        if (!entry || entry.sha !== sha || entry.deleted) {
+          await this.uploadBlob(sha, new Uint8Array(buf));
+          map.set(f.path, { sha, size: f.size, deleted: false });
+        }
+        this.hiddenSeen[f.path] = { sha, mtime: f.mtime };
+      } catch (e) {
+        console.warn("cloud-relay: hidden file gagal dibaca", f.path, e);
+      }
+      i++;
+      if (showProgress && i % 20 === 0) {
+        new Notice(`Cloud Relay: pengaturan ${i}/${files.length}…`);
+      }
+    }
+    // tandai file remote yang sudah tidak ada lokal (terhapus di device lain)
+    for (const [path, meta] of map.entries()) {
+      if (!meta.deleted && !this.vault.getAbstractFileByPath(path)) {
+        map.set(path, { ...meta, deleted: true });
+      }
+    }
+    await this.store.writeHiddenSeen(this.hiddenSeen);
+  }
+
+  onHiddenFileChange(path: string, deleted = false) {
+    if (this.suspended || !this.hiddenSyncEnabled) return;
+    if (!isHiddenSyncable(path)) return;
+    if (!deleted && this.isSelfWriteObsidian(path)) return;
+    void (async () => {
+      const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
+      if (!map) return;
+      try {
+        if (deleted) {
+          const prev = map.get(path);
+          if (prev && !prev.deleted) map.set(path, { ...prev, deleted: true });
+          delete this.hiddenSeen[path];
+        } else {
+          const buf = await this.vault.adapter.readBinary(`.obsidian/${path}`);
+          const sha = await sha256Hex(buf);
+          const prev = map.get(path);
+          if (prev && prev.sha === sha && !prev.deleted) return;
+          await this.uploadBlob(sha, new Uint8Array(buf));
+          map.set(path, { sha, size: buf.byteLength, deleted: false });
+          const f = this.vault.getAbstractFileByPath(path);
+          if (f instanceof TFile) {
+            this.markSelfWriteObsidian(path, f.stat.mtime);
+            this.hiddenSeen[path] = { sha, mtime: f.stat.mtime };
+          }
+        }
+      } catch (e) {
+        console.warn("cloud-relay: hidden change gagal", path, e);
+      }
+      await this.store.writeHiddenSeen(this.hiddenSeen);
+    })();
+  }
+
+  private selfWritesObsidian = new Map<string, { mtime: number; until: number }>();
+
+  private markSelfWriteObsidian(path: string, mtime: number) {
+    this.selfWritesObsidian.set(path, { mtime, until: Date.now() + 5000 });
+  }
+
+  private isSelfWriteObsidian(path: string): boolean {
+    const sw = this.selfWritesObsidian.get(path);
+    if (!sw) return false;
+    if (Date.now() > sw.until) {
+      this.selfWritesObsidian.delete(path);
+      return false;
+    }
+    return true;
+  }
+
+  private scheduleHiddenReconcile() {
+    if (!this.hiddenSyncEnabled) return;
+    if (this.hiddenReconcileTimer !== null)
+      window.clearTimeout(this.hiddenReconcileTimer);
+    this.hiddenReconcileTimer = window.setTimeout(() => {
+      this.hiddenReconcileTimer = null;
+      void this.reconcileHiddenFromRemote();
+    }, 800);
+  }
+
+  private async reconcileHiddenFromRemote() {
+    if (this.suspended) return;
+    const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
+    if (!map || !this.http) return;
+    for (const [path, meta] of map.entries()) {
+      if (this.suspended) return;
+      const localPath = `.obsidian/${path}`;
+      let localExists = false;
+      try {
+        localExists = await this.app.vault.adapter.exists(localPath);
+      } catch {}
+      if (meta.deleted) {
+        if (localExists) {
+          try {
+            await this.app.vault.adapter.remove(localPath);
+            console.log("cloud-relay: hidden file dihapus (remote)", path);
+          } catch {}
+        }
+        continue;
+      }
+      const seen = this.hiddenSeen[path];
+      if (localExists && seen && seen.sha === meta.sha) continue;
+      try {
+        const buf = await this.downloadBlob(meta.sha);
+        const cur = new Uint8Array(buf);
+        if (localExists && seen && seen.sha) {
+          try {
+            const curLocal = new Uint8Array(
+              await this.app.vault.adapter.readBinary(localPath)
+            );
+            const curLocalSha = await sha256Hex(curLocal.buffer);
+            if (curLocalSha === meta.sha) {
+              this.hiddenSeen[path] = { sha: meta.sha, mtime: Date.now() };
+              continue;
+            }
+          } catch {}
+        }
+        this.markSelfWriteObsidian(path, Date.now());
+        await this.app.vault.adapter.writeBinary(localPath, buf);
+        if (!localExists) this.markSelfWriteObsidian(path, Date.now());
+        this.hiddenSeen[path] = { sha: meta.sha, mtime: Date.now() };
+        new Notice(`Cloud Relay: pengaturan diperbarui — ${path}`);
+      } catch (e) {
+        console.warn("cloud-relay: gagal tarik hidden file", path, e);
+      }
+      await sleep0();
+    }
+    await this.store.writeHiddenSeen(this.hiddenSeen);
+  }
+
+  hiddenDiagnostic(): { local: number; meta: number } {
+    const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
+    let meta = 0;
+    if (map) {
+      for (const [, v] of map.entries()) if (!v.deleted) meta++;
+    }
+    return { local: this.listHiddenFiles().length, meta };
+  }
+
+  private docMap(docId: string): Y.Map<unknown> | null {
+    const entry = this.docs.get(docId);
+    return entry ? (entry.meta as unknown as Y.Map<unknown>) : null;
+  }
+
+  async uploadHiddenForce(): Promise<number> {
+    if (!this.http) return 0;
+    await this.ensureDoc(HIDDEN_ID, "");
+    const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
+    if (!map) return 0;
+    let n = 0;
+    for (const f of this.listHiddenFiles()) {
+      try {
+        const buf = await this.vault.adapter.readBinary(`.obsidian/${f.path}`);
+        const sha = await sha256Hex(buf);
+        await this.uploadBlob(sha, new Uint8Array(buf));
+        map.set(f.path, { sha, size: f.size, deleted: false });
+        this.hiddenSeen[f.path] = { sha, mtime: f.mtime };
+        n++;
+      } catch {}
+    }
+    await this.store.writeHiddenSeen(this.hiddenSeen);
+    return n;
+  }
+
   private async uploadBlob(sha: string, data: Uint8Array) {
     if (!this.http) throw new Error("transport belum siap");
     const url = `${this.http.baseUrl.replace(/\/$/, "")}/v1/blobs/${sha}?token=${encodeURIComponent(this.http.token)}`;
@@ -411,6 +635,10 @@ export class NoteSyncManager {
     this.stopFlushLoop();
   }
 
+  resumeAfterReset() {
+    this.suspended = false;
+  }
+
   async reset() {
     for (const t of this.persistTimers.values()) window.clearTimeout(t);
     this.persistTimers.clear();
@@ -432,14 +660,19 @@ export class NoteSyncManager {
       await this.persistNow(t);
     }
     await this.store.writeAttachSeen(this.attachSeen);
+    await this.store.writeHiddenSeen(this.hiddenSeen);
   }
 
   async sendSyncSteps(conn: Conn) {
     const ids = Object.keys(this.index).filter((id) => !this.index[id].deleted);
+    if (this.hiddenSyncEnabled && !ids.includes(HIDDEN_ID)) ids.push(HIDDEN_ID);
     for (const id of ids) {
+      if (id === HIDDEN_ID) {
+        await this.ensureDoc(HIDDEN_ID, "");
+      }
       let sv = this.svCache.get(id);
       if (!sv) {
-        await this.ensureDoc(id, this.index[id].path);
+        await this.ensureDoc(id, this.index[id]?.path);
         const entry = this.docs.get(id);
         if (entry) {
           sv = new Uint8Array(Y.encodeStateVector(entry.doc));
@@ -489,9 +722,19 @@ export class NoteSyncManager {
   }
 
   private queueApply(noteId: string, update: Uint8Array) {
+    this.applyQueueDepth++;
     this.applySerial = this.applySerial
       .then(() => this.applyRemote(noteId, update))
-      .catch((e) => console.error("cloud-relay apply gagal:", e));
+      .catch((e) => console.error("cloud-relay apply gagal:", e))
+      .finally(() => {
+        this.applyQueueDepth--;
+      });
+  }
+
+  private applyQueueDepth = 0;
+
+  applyQueueSize(): number {
+    return this.applyQueueDepth;
   }
 
   onFileModify(file: TFile, content: string) {
@@ -615,6 +858,19 @@ export class NoteSyncManager {
         Y.applyUpdate(entry!.doc, update);
       }, "remote");
       this.scheduleAttachReconcile();
+      return;
+    }
+    if (noteId === HIDDEN_ID) {
+      let entry = this.docs.get(HIDDEN_ID);
+      if (!entry) {
+        await this.ensureDoc(HIDDEN_ID, "");
+        entry = this.docs.get(HIDDEN_ID);
+      }
+      if (!entry) return;
+      entry.doc.transact(() => {
+        Y.applyUpdate(entry!.doc, update);
+      }, "remote");
+      this.scheduleHiddenReconcile();
       return;
     }
     await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
@@ -791,7 +1047,7 @@ export class NoteSyncManager {
     const localNoteIds: string[] = [];
     const pathById: Record<string, string> = {};
     for (const [id, idx] of Object.entries(this.index)) {
-      if (id === ATTACH_ID) continue;
+      if (id === ATTACH_ID || id === HIDDEN_ID) continue;
       if (!idx.deleted) {
         localNoteIds.push(id);
         pathById[id] = idx.path;

@@ -71,6 +71,23 @@ export class SyncStore {
     );
   }
 
+  async readHiddenSeen(): Promise<Record<string, { sha: string; mtime: number }>> {
+    const path = `${this.dir}/hidden-seen.json`;
+    if (!(await this.adapter.exists(path))) return {};
+    try {
+      return JSON.parse(await this.adapter.read(path));
+    } catch {
+      return {};
+    }
+  }
+
+  async writeHiddenSeen(seen: Record<string, { sha: string; mtime: number }>) {
+    await this.adapter.write(
+      `${this.dir}/hidden-seen.json`,
+      JSON.stringify(seen, null, 2)
+    );
+  }
+
   async archive() {
     if (await this.adapter.exists(this.dir)) {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);

@@ -63,6 +63,11 @@ export default class CloudRelayPlugin extends Plugin {
   }
 
   onunload() {
+    this.statusBar?.warnIfBusy();
+    if (this.statsTimer !== null) {
+      window.clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
     this.stopSync();
     void this.syncManager?.flush();
   }
@@ -223,6 +228,10 @@ export default class CloudRelayPlugin extends Plugin {
     return this.syncManager?.attachmentDiagnostic() ?? { local: 0, meta: 0 };
   }
 
+  hiddenDiagnostic() {
+    return this.syncManager?.hiddenDiagnostic() ?? { local: 0, meta: 0 };
+  }
+
   private scanning = false;
 
   async rescanVault() {
@@ -258,8 +267,52 @@ export default class CloudRelayPlugin extends Plugin {
     await this.syncManager?.reset();
   }
 
+  async testConnection(
+    serverUrl: string,
+    vaultId: string,
+    vaultToken: string
+  ): Promise<{ ok: boolean; message: string; notes?: number; lastUpdate?: number }> {
+    try {
+      const res = await requestUrl({
+        url: `${serverUrl.replace(/\/$/, "")}/v1/vaults/${vaultId}/info?token=${encodeURIComponent(vaultToken)}`,
+        method: "GET",
+      });
+      const body = res.json as { last_update: number; notes: number };
+      return {
+        ok: true,
+        message: "Server merespons",
+        notes: body.notes,
+        lastUpdate: body.last_update,
+      };
+    } catch (e) {
+      return { ok: false, message: `${e}`.slice(0, 120) };
+    }
+  }
+
   applyLimits() {
     this.syncManager?.setMaxNoteBytes((this.settings.maxNoteMB || 0) * 1024 * 1024);
+    this.syncManager?.setHiddenSyncEnabled(this.settings.hiddenSync !== false);
+  }
+
+  async recoverFromServer(): Promise<boolean> {
+    if (!this.syncManager) return false;
+    new Notice("Cloud Relay: memulihkan data sync dari server…");
+    this.stopSync();
+    await this.syncManager.reset();
+    const files = this.app.vault.getMarkdownFiles();
+    this.syncManager.suspend();
+    let n = 0;
+    for (const file of files) {
+      try {
+        await this.app.vault.trash(file, true);
+        n++;
+      } catch {}
+    }
+    this.syncManager.resumeAfterReset();
+    await this.saveSettings();
+    this.startSync();
+    new Notice(`Cloud Relay: ${n} catatan lokal dikosongkan, menarik ulang dari server…`);
+    return true;
   }
 
   startSync() {
@@ -269,27 +322,105 @@ export default class CloudRelayPlugin extends Plugin {
       token: this.settings.vaultToken,
     });
     this.applyLimits();
+    this.statusBar?.resetStats();
     this.connection = new RelayConnection(
       (status) => this.statusBar?.set(status),
       {
         onDocList: (ids) => {
           this.syncManager?.onDocList(ids);
+          void this.syncManager?.initHiddenFiles(false);
           this.onConnectSync();
         },
         onSyncStep1: (id, sv) => this.syncManager?.onSyncStep1(id, sv),
         onSyncStep2: (id, up) => this.syncManager?.onSyncStep2(id, up),
         onUpdate: (id, up) => this.syncManager?.onUpdate(id, up),
+        onSent: (n) => this.statusBar?.addSent(n),
+        onReceived: (n) => this.statusBar?.addReceived(n),
       }
     );
     this.syncManager.setConn(this.connection);
+    this.hiddenWatchStarted = Date.now();
+    this.hiddenWatchSeen.clear();
+    this.startHiddenWatcher();
     this.connection.connect(
       this.settings.serverUrl,
       this.settings.vaultId,
       this.settings.vaultToken
     );
+    if (this.statsTimer !== null) window.clearInterval(this.statsTimer);
+    this.statsTimer = window.setInterval(() => {
+      if (this.statusBar) {
+        this.statusBar.setQueued(this.syncManager?.applyQueueSize() ?? 0);
+      }
+    }, 500);
+  }
+
+  private statsTimer: number | null = null;
+
+  private hiddenWatcherTimer: number | null = null;
+  private hiddenWatchSeen = new Map<string, number>();
+
+  private startHiddenWatcher() {
+    if (this.hiddenWatcherTimer !== null) return;
+    this.hiddenWatcherTimer = window.setInterval(() => {
+      void this.pollHiddenFiles();
+    }, 5000);
+  }
+
+  private async pollHiddenFiles() {
+    if (!this.syncManager || !this.settings.hiddenSync) return;
+    const prev = this.hiddenWatchSeen;
+    const cur = new Map<string, number>();
+    try {
+      const list = await this.app.vault.adapter.list(".obsidian");
+      const allowed = [
+        "app.json", "appearance.json", "community-plugins.json",
+        "core-plugins.json", "hotkeys.json", "graph.json",
+      ];
+      for (const f of list.files) {
+        const rel = f.replace(/^\.obsidian\//, "");
+        if (!rel || rel.startsWith("plugins/cloud-relay/")) continue;
+        if (
+          !allowed.includes(rel) &&
+          !rel.startsWith("themes/") &&
+          !rel.startsWith("snippets/")
+        )
+          continue;
+        const st = await this.app.vault.adapter.stat(f);
+        if (st?.mtime) cur.set(rel, st.mtime);
+      }
+    } catch {}
+    for (const [rel, mtime] of cur) {
+      if (!prev.has(rel) || prev.get(rel) !== mtime) {
+        prev.set(rel, mtime);
+        if (prev.size > 1 || Date.now() - (this.hiddenWatchStarted || 0) > 6000) {
+          this.syncManager.onHiddenFileChange(rel);
+        }
+      }
+    }
+    for (const rel of Array.from(prev.keys())) {
+      if (!cur.has(rel)) {
+        prev.delete(rel);
+        this.syncManager.onHiddenFileChange(rel, true);
+      }
+    }
+  }
+
+  private hiddenWatchStarted = 0;
+
+  private stopHiddenWatcher() {
+    if (this.hiddenWatcherTimer !== null) {
+      window.clearInterval(this.hiddenWatcherTimer);
+      this.hiddenWatcherTimer = null;
+    }
   }
 
   stopSync() {
+    if (this.statsTimer !== null) {
+      window.clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
+    this.stopHiddenWatcher();
     this.syncManager?.setConn(null);
     this.connection?.disconnect();
     this.connection = null;

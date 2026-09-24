@@ -16,6 +16,8 @@ export interface ConnectionHandlers {
   onSyncStep1: (noteId: string, sv: Uint8Array) => void;
   onSyncStep2: (noteId: string, update: Uint8Array) => void;
   onUpdate: (noteId: string, update: Uint8Array) => void;
+  onSent?: (n: number) => void;
+  onReceived?: (n: number) => void;
 }
 
 const RECONNECT_MIN_MS = 1000;
@@ -64,6 +66,7 @@ export class RelayConnection {
 
     this.ws.onmessage = (event) => {
       this.lastMessageAt = Date.now();
+      this.handlers.onReceived?.(1);
       if (!(event.data instanceof ArrayBuffer)) return;
       const frame = decodeFrame(new Uint8Array(event.data));
       if (!frame) return;
@@ -136,6 +139,7 @@ export class RelayConnection {
   send(frame: Uint8Array) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(frame);
+      this.handlers.onSent?.(1);
     }
   }
 

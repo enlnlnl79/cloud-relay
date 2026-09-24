@@ -6,6 +6,7 @@ export interface CloudRelaySettings {
   isPrimary: boolean;
   enabled: boolean;
   maxNoteMB: number;
+  hiddenSync: boolean;
 }
 
 export const DEFAULT_SETTINGS: CloudRelaySettings = {
@@ -16,6 +17,7 @@ export const DEFAULT_SETTINGS: CloudRelaySettings = {
   isPrimary: false,
   enabled: false,
   maxNoteMB: 0,
+  hiddenSync: true,
 };
 
 export function parseInviteLink(
