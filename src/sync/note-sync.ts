@@ -49,10 +49,42 @@ export class NoteSyncManager {
   private applySerial: Promise<void> = Promise.resolve();
   private persistTimers = new Map<string, number>();
   private indexTimer: number | null = null;
+  private selfWrites = new Map<string, { mtime: number; until: number }>();
   private http: { baseUrl: string; token: string } | null = null;
   private maxNoteBytes = 0;
   private attachSeen: Record<string, { sha: string; mtime: number }> = {};
   private attachReconcileTimer: number | null = null;
+  private flushTimer: number | null = null;
+
+  private markSelfWrite(path: string, mtime: number) {
+    this.selfWrites.set(path, { mtime, until: Date.now() + 5000 });
+  }
+
+  private isSelfWrite(path: string, mtime: number): boolean {
+    const sw = this.selfWrites.get(path);
+    if (!sw) return false;
+    if (Date.now() > sw.until) {
+      this.selfWrites.delete(path);
+      return false;
+    }
+    return mtime <= sw.mtime + 5;
+  }
+
+  private startFlushLoop() {
+    if (this.flushTimer !== null) return;
+    this.flushTimer = window.setInterval(() => {
+      for (const id of this.persistTimers.keys()) {
+        void this.persistNow(id);
+      }
+    }, 2000);
+  }
+
+  private stopFlushLoop() {
+    if (this.flushTimer !== null) {
+      window.clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
 
   constructor(
     private app: App,
@@ -99,14 +131,29 @@ export class NoteSyncManager {
         if (entry) {
           const content = await this.vault.read(file);
           if (content !== entry.lastContent) {
-            const d = diffText(entry.lastContent, content);
-            entry.doc.transact(() => {
-              if (d.del > 0) entry.text.delete(d.retain, d.del);
-              if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
-              entry.meta.set("path", file.path);
-              entry.meta.set("deleted", false);
-            });
-            entry.lastContent = content;
+            const docLooksStale =
+              entry.lastContent.length === 0 &&
+              content.length > 0 &&
+              idx.mtime !== 0;
+            if (docLooksStale) {
+              // blob lokal tertinggal (crash/debounce) — JANGAN insert ulang,
+              // isi akan dipulihkan dari server via sync. Hanya catat mtime.
+              console.warn(
+                "cloud-relay: blob lokal stale utk",
+                file.path,
+                "— skip diff, tunggu sync dari server"
+              );
+            } else {
+              const d = diffText(entry.lastContent, content);
+              entry.doc.transact(() => {
+                if (d.del > 0) entry.text.delete(d.retain, d.del);
+                if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
+                entry.meta.set("path", file.path);
+                entry.meta.set("deleted", false);
+              });
+              entry.lastContent = content;
+              await this.persistNow(noteId);
+            }
           }
           idx.mtime = file.stat.mtime;
         }
@@ -198,6 +245,13 @@ export class NoteSyncManager {
     if (this.suspended) return;
     if (file.extension === "md") return;
     const path = file.path;
+    let mtime = 0;
+    try {
+      mtime = file.stat.mtime;
+    } catch {
+      mtime = Number.MAX_SAFE_INTEGER;
+    }
+    if (!deleted && this.isSelfWrite(path, mtime)) return;
     if (!deleted && this.applyingRemoteByPath.has(path)) return;
     void (async () => {
       const map = this.attachMap();
@@ -278,6 +332,10 @@ export class NoteSyncManager {
         if (this.attachSeen[path]) {
           const file = this.vault.getAbstractFileByPath(path);
           if (file instanceof TFile) {
+            let mtime = 0;
+            try {
+              mtime = file.stat.mtime;
+            } catch {}
             this.applyingRemoteByPath.add(path);
             try {
               await this.vault.trash(file, true);
@@ -287,6 +345,7 @@ export class NoteSyncManager {
               } catch {}
             }
             this.applyingRemoteByPath.delete(path);
+            this.markSelfWrite(path, mtime);
           }
           delete this.attachSeen[path];
         }
@@ -307,10 +366,17 @@ export class NoteSyncManager {
           await this.ensureParentFolders(path);
           if (file instanceof TFile) await this.vault.modifyBinary(file, buf);
           else await this.vault.createBinary(path, buf);
+          const nf = this.vault.getAbstractFileByPath(path);
+          if (nf instanceof TFile) {
+            this.markSelfWrite(path, nf.stat.mtime);
+            this.attachSeen[path] = { sha: meta.sha, mtime: nf.stat.mtime };
+          }
         } finally {
           this.applyingRemoteByPath.delete(path);
         }
-        this.attachSeen[path] = { sha: meta.sha, mtime: Date.now() };
+        if (!this.attachSeen[path]) {
+          this.attachSeen[path] = { sha: meta.sha, mtime: Date.now() };
+        }
       } catch (e) {
         console.warn("cloud-relay: gagal tarik lampiran", path, e);
       }
@@ -333,10 +399,16 @@ export class NoteSyncManager {
 
   setConn(conn: Conn | null) {
     this.conn = conn;
+    if (conn) {
+      this.startFlushLoop();
+    } else {
+      this.stopFlushLoop();
+    }
   }
 
   suspend() {
     this.suspended = true;
+    this.stopFlushLoop();
   }
 
   async reset() {
@@ -344,6 +416,7 @@ export class NoteSyncManager {
     this.persistTimers.clear();
     if (this.indexTimer !== null) window.clearTimeout(this.indexTimer);
     this.indexTimer = null;
+    this.selfWrites.clear();
     this.index = {};
     this.docs.clear();
     this.svCache.clear();
@@ -424,6 +497,7 @@ export class NoteSyncManager {
   onFileModify(file: TFile, content: string) {
     if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
+    if (this.isSelfWrite(file.path, file.stat.mtime)) return;
     if (this.applyingRemoteByPath.has(file.path)) return;
     if (this.guardSize(file)) return;
     let noteId = this.findNoteIdByPath(file.path);
@@ -438,6 +512,19 @@ export class NoteSyncManager {
       await this.ensureDoc(id, file.path);
       const entry = this.docs.get(id);
       if (!entry || content === entry.lastContent) return;
+      const idx = this.index[id];
+      if (
+        entry.lastContent.length === 0 &&
+        content.length > 0 &&
+        idx &&
+        idx.mtime !== 0
+      ) {
+        // doc lokal tertinggal (blob stale) — tunggu sync dari server,
+        // jangan insert ulang isi (duplikasi CRDT)
+        idx.mtime = file.stat.mtime;
+        this.scheduleIndexWrite();
+        return;
+      }
       const d = diffText(entry.lastContent, content);
       entry.doc.transact(() => {
         if (d.del > 0) entry.text.delete(d.retain, d.del);
@@ -459,6 +546,13 @@ export class NoteSyncManager {
   onFileDelete(file: TFile) {
     if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
+    let mtime = 0;
+    try {
+      mtime = file.stat.mtime;
+    } catch {
+      mtime = Number.MAX_SAFE_INTEGER;
+    }
+    if (this.isSelfWrite(file.path, mtime)) return;
     const path = file.path;
     if (this.applyingRemoteByPath.has(path)) return;
     const noteId = this.findNoteIdByPath(path);
@@ -478,6 +572,14 @@ export class NoteSyncManager {
   onFileRename(file: TFile, oldPath: string) {
     if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
+    let mtime = 0;
+    try {
+      mtime = file.stat.mtime;
+    } catch {
+      mtime = Number.MAX_SAFE_INTEGER;
+    }
+    if (this.isSelfWrite(file.path, mtime)) return;
+    if (this.isSelfWrite(oldPath, mtime)) return;
     if (
       this.applyingRemoteByPath.has(oldPath) ||
       this.applyingRemoteByPath.has(file.path)
@@ -533,16 +635,21 @@ export class NoteSyncManager {
       if (existingPath) {
         const file = this.vault.getAbstractFileByPath(existingPath);
         if (file instanceof TFile) {
+          let mtime = 0;
+          try {
+            mtime = file.stat.mtime;
+          } catch {}
           this.applyingRemoteByPath.add(existingPath);
           await this.vault.delete(file);
           this.applyingRemoteByPath.delete(existingPath);
+          this.markSelfWrite(existingPath, mtime);
         }
       }
       if (idx) idx.deleted = true;
       this.scheduleIndexWrite();
       entry.lastContent = "";
       entry.lastPath = existingPath;
-      this.persistDoc(noteId);
+      await this.persistNow(noteId);
       return;
     }
 
@@ -560,11 +667,16 @@ export class NoteSyncManager {
         await this.vault.create(finalPath, newContent);
         this.applyingRemoteByPath.delete(finalPath);
         this.index[noteId] = { path: finalPath, deleted: false };
+        const nf = this.vault.getAbstractFileByPath(finalPath);
+        if (nf instanceof TFile) {
+          this.markSelfWrite(finalPath, nf.stat.mtime);
+          this.index[noteId].mtime = nf.stat.mtime;
+        }
       }
       this.scheduleIndexWrite();
       entry.lastContent = newContent;
       entry.lastPath = finalPath;
-      this.persistDoc(noteId);
+      await this.persistNow(noteId);
       return;
     }
 
@@ -575,12 +687,17 @@ export class NoteSyncManager {
         this.applyingRemoteByPath.add(newPath);
         await this.vault.rename(file, newPath);
         this.applyingRemoteByPath.delete(newPath);
+        const nf = this.vault.getAbstractFileByPath(newPath);
+        if (nf instanceof TFile) {
+          this.markSelfWrite(newPath, nf.stat.mtime);
+          idx.mtime = nf.stat.mtime;
+        }
       }
       idx.path = newPath;
       this.scheduleIndexWrite();
       entry.lastContent = newContent;
       entry.lastPath = newPath;
-      this.persistDoc(noteId);
+      await this.persistNow(noteId);
       return;
     }
 
@@ -590,13 +707,17 @@ export class NoteSyncManager {
         this.applyingRemoteByPath.add(existingPath);
         await this.vault.modify(file, newContent);
         this.applyingRemoteByPath.delete(existingPath);
-        idx.mtime = file.stat.mtime;
+        const nf = this.vault.getAbstractFileByPath(existingPath);
+        if (nf instanceof TFile) {
+          this.markSelfWrite(existingPath, nf.stat.mtime);
+          idx.mtime = nf.stat.mtime;
+        }
         this.scheduleIndexWrite();
       }
     }
     entry.lastContent = newContent;
     entry.lastPath = existingPath;
-    this.persistDoc(noteId);
+    await this.persistNow(noteId);
   }
 
   private async ensureDoc(noteId: string, path: string) {
