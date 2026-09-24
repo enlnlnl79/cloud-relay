@@ -137,13 +137,21 @@ pengaturan via blob.
 | `hidden-seen.json` | path→{sha, mtime} | cache file .obsidian |
 | `__attachments__.bin/.sv`, `__hiddens__.bin/.sv` | doc metadata | |
 
-## 7. Build, Rilis, Distribusi
+## 7. Build, Rilis, Distribusi, TEST
 
 ```bash
 npm install
 npm run dev      # watch (dev)
 npm run build    # tsc + esbuild production → main.js
+npm test         # 16 test otomatis (mock Vault + fetch, tanpa Obsidian)
 ```
+
+**Test harness** (`test/`): `mock-vault.ts` meniru Vault+adapter+event Obsidian,
+`obsidian-mock.ts` stub modul obsidian (via esbuild alias), `run.mjs` test suite.
+Menutup: protocol round-trip, diffText, invite link, race modify, hidden
+delete-cascade, attachment startup, self-write guard, rename konflik, delete
+lintas-ID. **Aturan: `npm test` wajib hijau sebelum rilis.** Menambah fitur
+note-sync → tambahkan test kasusnya.
 
 **Rilis (BRAT membaca GitHub Releases, harus prerelease=false!):**
 1. Naikkan versi di `manifest.json` + `package.json` + tambah entry
