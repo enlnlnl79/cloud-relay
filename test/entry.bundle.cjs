@@ -8944,9 +8944,10 @@ var NoteSyncManager = class {
   }
   async init(showProgress = false) {
     await this.store.ensureDir();
-    this.index = await this.store.readIndex();
-    this.attachSeen = await this.store.readAttachSeen();
-    this.hiddenSeen = await this.store.readHiddenSeen();
+    const diskIndex = await this.store.readIndex();
+    this.index = { ...diskIndex, ...this.index };
+    this.attachSeen = { ...await this.store.readAttachSeen(), ...this.attachSeen };
+    this.hiddenSeen = { ...await this.store.readHiddenSeen(), ...this.hiddenSeen };
     const noteIds = Object.keys(this.index);
     let j = 0;
     for (const id2 of noteIds) {
@@ -9000,6 +9001,7 @@ var NoteSyncManager = class {
       }
       if (i % 10 === 0) await sleep0();
     }
+    await this.store.writeIndex(this.index);
     this.scheduleIndexWrite();
     await this.ensureDoc(ATTACH_ID, "");
     this.markLocallyDeletedAttachments();
@@ -9583,6 +9585,7 @@ var NoteSyncManager = class {
       noteId = crypto.randomUUID();
       this.index[noteId] = { path: file.path, deleted: false, mtime: 0 };
       wasKnown = false;
+      void this.store.writeIndex(this.index);
     }
     const id2 = noteId;
     const isNewNote = !wasKnown;
@@ -9636,7 +9639,7 @@ var NoteSyncManager = class {
     const noteId = this.findNoteIdByPath(path);
     if (!noteId) return;
     this.index[noteId].deleted = true;
-    this.scheduleIndexWrite();
+    void this.store.writeIndex(this.index);
     void (async () => {
       await this.ensureDoc(noteId, path);
       const entry = this.docs.get(noteId);

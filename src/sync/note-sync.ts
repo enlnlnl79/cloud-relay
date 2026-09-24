@@ -123,9 +123,13 @@ export class NoteSyncManager {
 
   async init(showProgress = false) {
     await this.store.ensureDir();
-    this.index = await this.store.readIndex();
-    this.attachSeen = await this.store.readAttachSeen();
-    this.hiddenSeen = await this.store.readHiddenSeen();
+    // MERGE index disk dengan in-memory (in-memory menang) — mencegah
+    // init ulang membuang pengetahuan note yang belum ter-flush ke disk
+    // (akar duplikasi note-id → ping-pong konflik antar device)
+    const diskIndex = await this.store.readIndex();
+    this.index = { ...diskIndex, ...this.index };
+    this.attachSeen = { ...(await this.store.readAttachSeen()), ...this.attachSeen };
+    this.hiddenSeen = { ...(await this.store.readHiddenSeen()), ...this.hiddenSeen };
 
     const noteIds = Object.keys(this.index);
     let j = 0;
@@ -186,6 +190,9 @@ export class NoteSyncManager {
       }
       if (i % 10 === 0) await sleep0();
     }
+    // tulis index LANGSUNG — disk harus segar setelah init (bukan debounce),
+    // supaya init berikutnya tidak membaca index basi → duplikat note-id
+    await this.store.writeIndex(this.index);
     this.scheduleIndexWrite();
     await this.ensureDoc(ATTACH_ID, "");
     this.markLocallyDeletedAttachments();
@@ -821,6 +828,9 @@ export class NoteSyncManager {
       noteId = crypto.randomUUID();
       this.index[noteId] = { path: file.path, deleted: false, mtime: 0 };
       wasKnown = false;
+      // note baru: tulis index LANGSUNG (jarang terjadi, murah) —
+      // debounce bisa membuat index disk basi → note-id dobel di init berikutnya
+      void this.store.writeIndex(this.index);
     }
     const id = noteId;
     const isNewNote = !wasKnown;
@@ -888,7 +898,8 @@ export class NoteSyncManager {
     const noteId = this.findNoteIdByPath(path);
     if (!noteId) return;
     this.index[noteId].deleted = true;
-    this.scheduleIndexWrite();
+    // delete = event penting: tulis index langsung, bukan debounce
+    void this.store.writeIndex(this.index);
     void (async () => {
       await this.ensureDoc(noteId, path);
       const entry = this.docs.get(noteId);

@@ -1,13 +1,14 @@
 {
   "name": "cloud-relay",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Obsidian sync plugin powered by CRDT",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "test": "node test/build.mjs && node test/run.mjs",
-    "e2e": "node test/build.mjs && node test/e2e.mjs"
+    "e2e": "node test/build.mjs && node test/e2e.mjs",
+    "e2e-join": "node test/build.mjs && node test/e2e-join.mjs"
   },
   "keywords": [
     "obsidian",
