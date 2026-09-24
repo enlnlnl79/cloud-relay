@@ -327,22 +327,43 @@ export class NoteSyncManager {
     }
   }
 
-  private listHiddenFiles(): { path: string; mtime: number; size: number }[] {
-    const res: { path: string; mtime: number; size: number }[] = [];
-    for (const f of this.vault.getFiles()) {
-      if (!isHiddenSyncable(f.path)) continue;
-      res.push({ path: f.path, mtime: f.stat.mtime, size: f.stat.size });
-    }
-    return res;
+  private async listHiddenFiles(): Promise<{ path: string; mtime: number; size: number }[]> {
+    const acc: { path: string; mtime: number; size: number }[] = [];
+    const walk = async (dir: string) => {
+      let list: { files: string[]; folders: string[] };
+      try {
+        list = await this.app.vault.adapter.list(dir);
+      } catch {
+        return;
+      }
+      for (const f of list.files) {
+        const rel = f.replace(/^\.obsidian\//, "");
+        if (!rel || rel.startsWith("plugins/cloud-relay/")) continue;
+        const top = rel.split("/")[0];
+        const name = rel.split("/").pop() ?? "";
+        if (!HIDDEN_FILES.includes(name) && !HIDDEN_DIRS.includes(top)) continue;
+        const st = await this.app.vault.adapter.stat(f);
+        if (st) acc.push({ path: rel, mtime: st.mtime, size: st.size });
+      }
+      for (const d of list.folders) {
+        const rel = d.replace(/^\.obsidian\//, "");
+        if (HIDDEN_DIRS.includes(rel.split("/")[0])) await walk(d);
+      }
+    };
+    await walk(".obsidian");
+    return acc;
   }
 
   async initHiddenFiles(showProgress = false) {
-    if (!this.http || !this.hiddenSyncEnabled) return;
+    if (!this.http || !this.hiddenSyncEnabled) {
+      console.warn("cloud-relay: initHidden skip — http:", !!this.http, "enabled:", this.hiddenSyncEnabled);
+      return;
+    }
     await this.ensureDoc(HIDDEN_ID, "");
     const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
     if (!map) return;
     let i = 0;
-    const files = this.listHiddenFiles();
+    const files = await this.listHiddenFiles();
     for (const f of files) {
       if (this.suspended) return;
       try {
@@ -484,13 +505,13 @@ export class NoteSyncManager {
     await this.store.writeHiddenSeen(this.hiddenSeen);
   }
 
-  hiddenDiagnostic(): { local: number; meta: number } {
+  async hiddenDiagnostic(): Promise<{ local: number; meta: number }> {
     const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
     let meta = 0;
     if (map) {
       for (const [, v] of map.entries()) if (!v.deleted) meta++;
     }
-    return { local: this.listHiddenFiles().length, meta };
+    return { local: (await this.listHiddenFiles()).length, meta };
   }
 
   private docMap(docId: string): Y.Map<unknown> | null {
@@ -504,7 +525,7 @@ export class NoteSyncManager {
     const map = this.docMap(HIDDEN_ID) as unknown as Y.Map<AttachMeta> | null;
     if (!map) return 0;
     let n = 0;
-    for (const f of this.listHiddenFiles()) {
+    for (const f of await this.listHiddenFiles()) {
       try {
         const buf = await this.vault.adapter.readBinary(`.obsidian/${f.path}`);
         const sha = await sha256Hex(buf);

@@ -388,9 +388,10 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     if (this.plugin.settings.hiddenSync !== false) {
-      const hd = this.plugin.hiddenDiagnostic();
-      containerEl.createEl("p", {
-        text: `Pengaturan tersinkron: lokal ${hd.local} file, terdaftar ${hd.meta} file`,
+      void this.plugin.hiddenDiagnostic().then((hd) => {
+        containerEl.createEl("p", {
+          text: `Pengaturan tersinkron: lokal ${hd.local} file, terdaftar ${hd.meta} file`,
+        });
       });
     }
 

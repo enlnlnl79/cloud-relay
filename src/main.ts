@@ -59,6 +59,13 @@ export default class CloudRelayPlugin extends Plugin {
 
     if (this.settings.enabled && this.settings.vaultId) {
       this.startSync();
+      void this.syncManager
+        ?.initHiddenFiles(false)
+        .then(() => {
+          void this.bootLog("initHidden selesai");
+          void this.syncManager?.initAttachments(false);
+        })
+        .catch((e) => this.bootLog(`initHidden ERROR: ${e}`));
     }
   }
 
@@ -229,7 +236,7 @@ export default class CloudRelayPlugin extends Plugin {
   }
 
   hiddenDiagnostic() {
-    return this.syncManager?.hiddenDiagnostic() ?? { local: 0, meta: 0 };
+    return this.syncManager?.hiddenDiagnostic() ?? Promise.resolve({ local: 0, meta: 0 });
   }
 
   private scanning = false;
