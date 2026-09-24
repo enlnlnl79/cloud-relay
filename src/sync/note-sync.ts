@@ -20,6 +20,10 @@ export function isSyncablePath(path: string): boolean {
   return path.endsWith(".md");
 }
 
+const MAX_NOTE_BYTES = 2 * 1024 * 1024;
+
+const skipNoticeShown = new Set<string>();
+
 const PERSIST_DEBOUNCE_MS = 3000;
 
 export class NoteSyncManager {
@@ -53,7 +57,9 @@ export class NoteSyncManager {
       if (++j % 20 === 0) await sleep0();
     }
 
-    const files = this.vault.getMarkdownFiles().filter((f) => isSyncablePath(f.path));
+    const files = this.vault
+      .getMarkdownFiles()
+      .filter((f) => isSyncablePath(f.path) && f.stat.size <= MAX_NOTE_BYTES);
     let i = 0;
     for (const file of files) {
       let noteId = this.findNoteIdByPath(file.path);
@@ -181,6 +187,7 @@ export class NoteSyncManager {
     if (this.suspended) return;
     if (!isSyncablePath(file.path)) return;
     if (this.applyingRemoteByPath.has(file.path)) return;
+    if (this.guardSize(file)) return;
     let noteId = this.findNoteIdByPath(file.path);
     if (!noteId) {
       noteId = crypto.randomUUID();
@@ -418,6 +425,19 @@ export class NoteSyncManager {
       }
     }
     return { localNoteIds, pathById };
+  }
+
+  private guardSize(file: TFile): boolean {
+    if (file.stat.size <= MAX_NOTE_BYTES) return false;
+    if (!skipNoticeShown.has(file.path)) {
+      skipNoticeShown.add(file.path);
+      new Notice(
+        `Cloud Relay: '${file.path}' (${(file.stat.size / 1024 / 1024).toFixed(1)} MB) melebihi batas 2 MB — dilewati dari sync`,
+        10000
+      );
+      console.warn("cloud-relay: note terlalu besar, skip", file.path, file.stat.size);
+    }
+    return true;
   }
 
   private findNoteIdByPath(path: string): string | null {
