@@ -1,4 +1,4 @@
-import { Notice, Plugin, requestUrl, TFile } from "obsidian";
+import { Notice, Plugin, requestUrl, TFile, TFolder } from "obsidian";
 import { CloudRelaySettings, DEFAULT_SETTINGS } from "./settings";
 import { StatusBar } from "./sync/status";
 import { RelayConnection } from "./sync/connection";
@@ -63,6 +63,7 @@ export default class CloudRelayPlugin extends Plugin {
     this.addSettingTab(new CloudRelaySettingTab(this.app, this));
 
     if (this.settings.enabled && this.settings.vaultId) {
+      await this.syncManager?.initFolders();
       this.startSync();
       void this.syncManager
         ?.initHiddenFiles(false)
@@ -96,6 +97,8 @@ export default class CloudRelayPlugin extends Plugin {
           } else {
             manager.onAttachmentChange(file);
           }
+        } else if (file instanceof TFolder) {
+          manager.onFolderChange(file.path, false);
         }
       })
     );
@@ -115,6 +118,8 @@ export default class CloudRelayPlugin extends Plugin {
         if (file instanceof TFile) {
           if (file.extension === "md") manager.onFileDelete(file);
           else manager.onAttachmentChange(file, true);
+        } else if (file instanceof TFolder) {
+          manager.onFolderChange(file.path, true);
         }
       })
     );
@@ -123,6 +128,8 @@ export default class CloudRelayPlugin extends Plugin {
         if (file instanceof TFile) {
           if (file.extension === "md") manager.onFileRename(file, oldPath);
           else manager.onAttachmentChange(file, false, oldPath);
+        } else if (file instanceof TFolder) {
+          manager.onFolderChange(file.path, false, oldPath);
         }
       })
     );
@@ -244,6 +251,10 @@ export default class CloudRelayPlugin extends Plugin {
     return this.syncManager?.hiddenDiagnostic() ?? Promise.resolve({ local: 0, meta: 0 });
   }
 
+  folderDiagnostic() {
+    return this.syncManager?.folderDiagnostic() ?? Promise.resolve({ local: 0, meta: 0 });
+  }
+
   private scanning = false;
 
   async rescanVault() {
@@ -339,6 +350,7 @@ export default class CloudRelayPlugin extends Plugin {
       (status) => this.statusBar?.set(status),
       {
         onDocList: (ids) => {
+          void this.syncManager?.initFolders();
           this.syncManager?.onDocList(ids);
           void this.syncManager?.initHiddenFiles(false);
           this.onConnectSync();

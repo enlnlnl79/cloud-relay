@@ -448,8 +448,9 @@ export class CloudRelaySettingTab extends PluginSettingTab {
             .map((f) => f.path)
             .join(", ");
           const attach = this.plugin.attachmentDiagnostic();
+          const folders = await this.plugin.folderDiagnostic();
           new Notice(
-            `Cloud Relay — catatan: vault ${vaultFiles.length}, terdaftar ${local.localNoteIds.length}, server ${serverCount}, belum terdaftar ${belumTerdaftar.length}${sampel ? ` (${sampel}…)` : ""}, belum terkirim ${belumTerkirim.length}, belum diterima ${belumDiterima.length} | lampiran: lokal ${attach.local}, meta ${attach.meta}`,
+            `Cloud Relay — catatan: vault ${vaultFiles.length}, terdaftar ${local.localNoteIds.length}, server ${serverCount}, belum terdaftar ${belumTerdaftar.length}${sampel ? ` (${sampel}…)` : ""}, belum terkirim ${belumTerkirim.length}, belum diterima ${belumDiterima.length} | lampiran: lokal ${attach.local}, meta ${attach.meta} | folder: lokal ${folders.local}, meta ${folders.meta}`,
             12000
           );
           this.display();

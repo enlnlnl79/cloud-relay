@@ -8862,6 +8862,7 @@ function isSyncablePath(path) {
 }
 var ATTACH_ID = "__attachments__";
 var HIDDEN_ID = "__hiddens__";
+var FOLDER_ID = "__folders__";
 var HIDDEN_FILES = [
   "app.json",
   "appearance.json",
@@ -9165,6 +9166,79 @@ var NoteSyncManager = class {
     };
     await walk(".obsidian");
     return acc;
+  }
+  async listVaultFolders() {
+    const out = [];
+    const walk = async (dir) => {
+      let list;
+      try {
+        list = await this.app.vault.adapter.list(dir);
+      } catch {
+        return;
+      }
+      for (const folder of list.folders) {
+        const clean = folder.replace(/^\//, "").replace(/\/$/, "");
+        if (!clean || clean.startsWith(".obsidian")) continue;
+        out.push(clean);
+        await walk(folder);
+      }
+    };
+    await walk("");
+    return Array.from(new Set(out));
+  }
+  async initFolders() {
+    await this.ensureDoc(FOLDER_ID, "");
+    await this.scanFolders();
+  }
+  async scanFolders() {
+    if (!this.conn) return;
+    const map = this.docMap(FOLDER_ID);
+    if (!map) return;
+    const local = new Set(await this.listVaultFolders());
+    for (const folder of local) map.set(folder, true);
+    for (const [folder, active] of map.entries()) {
+      if (active && !local.has(folder)) map.set(folder, false);
+    }
+  }
+  onFolderChange(path, deleted = false, oldPath) {
+    if (this.suspended || !this.conn || path.startsWith(".obsidian")) return;
+    const map = this.docMap(FOLDER_ID);
+    if (!map) return;
+    if (oldPath && oldPath !== path) {
+      const old = map.get(oldPath);
+      if (old) map.delete(oldPath);
+    }
+    map.set(path, !deleted);
+  }
+  async reconcileFoldersFromRemote() {
+    const map = this.docMap(FOLDER_ID);
+    if (!map) return;
+    for (const [folder, active] of map.entries()) {
+      if (active) {
+        try {
+          await this.ensureParentFolders(`${folder}/.cloud-relay-folder`);
+        } catch {
+        }
+        if (!await this.app.vault.adapter.exists(folder)) {
+          try {
+            await this.app.vault.createFolder(folder);
+          } catch {
+          }
+        }
+      } else if (await this.app.vault.adapter.exists(folder)) {
+        try {
+          await this.app.vault.adapter.remove(folder);
+        } catch {
+        }
+      }
+    }
+  }
+  async folderDiagnostic() {
+    const map = this.docMap(FOLDER_ID);
+    return {
+      local: (await this.listVaultFolders()).length,
+      meta: map ? Array.from(map.values()).filter(Boolean).length : 0
+    };
   }
   async initHiddenFiles(showProgress = false) {
     if (!this.http || !this.hiddenSyncEnabled) {
@@ -9498,11 +9572,11 @@ var NoteSyncManager = class {
   }
   async sendSyncSteps(conn) {
     const ids = Object.keys(this.index).filter((id2) => !this.index[id2].deleted);
+    if (!ids.includes(FOLDER_ID)) ids.push(FOLDER_ID);
     if (this.hiddenSyncEnabled && !ids.includes(HIDDEN_ID)) ids.push(HIDDEN_ID);
     for (const id2 of ids) {
-      if (id2 === HIDDEN_ID) {
-        await this.ensureDoc(HIDDEN_ID, "");
-      }
+      if (id2 === FOLDER_ID) await this.ensureDoc(FOLDER_ID, "");
+      if (id2 === HIDDEN_ID) await this.ensureDoc(HIDDEN_ID, "");
       let sv = this.svCache.get(id2);
       if (!sv) {
         await this.ensureDoc(id2, this.index[id2]?.path);
@@ -9691,6 +9765,19 @@ var NoteSyncManager = class {
         applyUpdate(entry2.doc, update);
       }, "remote");
       this.scheduleAttachReconcile();
+      return;
+    }
+    if (noteId === FOLDER_ID) {
+      let entry2 = this.docs.get(FOLDER_ID);
+      if (!entry2) {
+        await this.ensureDoc(FOLDER_ID, "");
+        entry2 = this.docs.get(FOLDER_ID);
+      }
+      if (!entry2) return;
+      entry2.doc.transact(() => {
+        applyUpdate(entry2.doc, update);
+      }, "remote");
+      await this.reconcileFoldersFromRemote();
       return;
     }
     if (noteId === HIDDEN_ID) {
