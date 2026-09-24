@@ -24,6 +24,7 @@ const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const PING_INTERVAL_MS = 15000;
 const STALE_THRESHOLD_MS = 35000;
+const OUTGOING_BUFFER_MAX = 500;
 
 export class RelayConnection {
   private ws: WebSocket | null = null;
@@ -37,6 +38,7 @@ export class RelayConnection {
   private handlers: ConnectionHandlers;
   private current: { serverUrl: string; vaultId: string; token: string } | null =
     null;
+  private outgoing: Uint8Array[] = [];
 
   constructor(
     onStatus: (status: SyncStatus) => void,
@@ -54,17 +56,25 @@ export class RelayConnection {
 
     const wsUrl = serverUrl.replace(/^http/, "ws").replace(/\/$/, "");
     const url = `${wsUrl}/sync/${vaultId}?token=${encodeURIComponent(token)}`;
-    this.ws = new WebSocket(url);
-    this.ws.binaryType = "arraybuffer";
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    ws.binaryType = "arraybuffer";
     this.lastMessageAt = Date.now();
 
-    this.ws.onopen = () => {
+    ws.onopen = () => {
+      // hanya proses kalau socket ini masih yang aktif
+      if (this.ws !== ws) return;
       this.reconnectDelay = RECONNECT_MIN_MS;
       this.onStatus("synced");
       this.startHeartbeat();
+      // flush frame yang tertahan saat CONNECTING
+      const pending = this.outgoing;
+      this.outgoing = [];
+      for (const frame of pending) this.send(frame);
     };
 
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return;
       this.lastMessageAt = Date.now();
       this.handlers.onReceived?.(1);
       if (!(event.data instanceof ArrayBuffer)) return;
@@ -87,7 +97,9 @@ export class RelayConnection {
       }
     };
 
-    this.ws.onclose = () => {
+    ws.onclose = () => {
+      // abaikan onclose dari socket yang sudah diganti (force-reconnect zombie)
+      if (this.ws !== ws) return;
       this.stopHeartbeat();
       this.ws = null;
       if (this.closedByUser) {
@@ -98,7 +110,7 @@ export class RelayConnection {
       }
     };
 
-    this.ws.onerror = () => {};
+    ws.onerror = () => {};
   }
 
   disconnect() {
@@ -137,9 +149,16 @@ export class RelayConnection {
   }
 
   send(frame: Uint8Array) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(frame);
+    const ws = this.ws;
+    if (!ws) return;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(frame);
       this.handlers.onSent?.(1);
+    } else if (ws.readyState === WebSocket.CONNECTING) {
+      // tahan frame; akan diflush saat open (update tidak hilang di celah reconnect)
+      if (this.outgoing.length < OUTGOING_BUFFER_MAX) {
+        this.outgoing.push(frame);
+      }
     }
   }
 

@@ -201,17 +201,25 @@ export class NoteSyncManager {
     const map = this.attachMap();
     if (!map) return;
     let changed = false;
-    for (const path of Object.keys(this.attachSeen)) {
-      if (this.suspended) return;
-      if (this.vault.getAbstractFileByPath(path)) continue;
-      const entry = map.get(path);
-      if (entry && !entry.deleted) {
-        map.set(path, { ...entry, deleted: true });
-        changed = true;
+    void (async () => {
+      for (const path of Object.keys(this.attachSeen)) {
+        if (this.suspended) return;
+        if (this.vault.getAbstractFileByPath(path)) continue;
+        // cek fs-level: file mungkin ada tapi belum ter-index Obsidian (startup)
+        let existsOnDisk = false;
+        try {
+          existsOnDisk = await this.app.vault.adapter.exists(path);
+        } catch {}
+        if (existsOnDisk) continue;
+        const entry = map.get(path);
+        if (entry && !entry.deleted) {
+          map.set(path, { ...entry, deleted: true });
+          changed = true;
+        }
+        delete this.attachSeen[path];
       }
-      delete this.attachSeen[path];
-    }
-    if (changed) void this.store.writeAttachSeen(this.attachSeen);
+      if (changed) void this.store.writeAttachSeen(this.attachSeen);
+    })();
   }
 
   async initAttachments(showProgress = false) {
@@ -388,9 +396,15 @@ export class NoteSyncManager {
         new Notice(`Cloud Relay: pengaturan ${i}/${files.length}…`);
       }
     }
-    // tandai file remote yang sudah tidak ada lokal (terhapus di device lain)
+    // tandai file remote yang sudah tidak ada lokal (terhapus di device lain).
+    // PENTING: cek via adapter (fs) — vault.getAbstractFileByPath TIDAK melacak .obsidian/
     for (const [path, meta] of map.entries()) {
-      if (!meta.deleted && !this.vault.getAbstractFileByPath(path)) {
+      if (meta.deleted) continue;
+      let existsLocally = false;
+      try {
+        existsLocally = await this.app.vault.adapter.exists(`.obsidian/${path}`);
+      } catch {}
+      if (!existsLocally) {
         map.set(path, { ...meta, deleted: true });
       }
     }
@@ -716,12 +730,32 @@ export class NoteSyncManager {
         sv = entry ? new Uint8Array(Y.encodeStateVector(entry.doc)) : new Uint8Array(0);
         this.svCache.set(id, sv);
       }
-      if (this.conn) {
+      if (this.conn && sv.length > 0) {
         this.conn.send(encodeFrame(MSG_SYNC_STEP1, id, sv));
       }
     }
     this.scheduleIndexWrite();
-    void this.initAttachments(false);
+    this.scheduleInitAttachments();
+  }
+
+  private attachmentsInitRunning = false;
+  private attachmentsInitPending = false;
+
+  private scheduleInitAttachments() {
+    if (this.attachmentsInitRunning) {
+      this.attachmentsInitPending = true;
+      return;
+    }
+    this.attachmentsInitRunning = true;
+    void this.initAttachments()
+      .catch(() => {})
+      .finally(() => {
+        this.attachmentsInitRunning = false;
+        if (this.attachmentsInitPending) {
+          this.attachmentsInitPending = false;
+          this.scheduleInitAttachments();
+        }
+      });
   }
 
   onSyncStep1(noteId: string, sv: Uint8Array) {
@@ -909,17 +943,27 @@ export class NoteSyncManager {
     const existingPath = idx?.path ?? "";
 
     if (deleted) {
-      if (existingPath) {
-        const file = this.vault.getAbstractFileByPath(existingPath);
+      // target: path index lokal, fallback ke path remote (note ID bisa beda
+      // antar device pada mode merge — delete harus tetap menghapus file)
+      const target = existingPath || newPath;
+      if (target) {
+        const file = this.vault.getAbstractFileByPath(target);
         if (file instanceof TFile) {
           let mtime = 0;
           try {
             mtime = file.stat.mtime;
           } catch {}
-          this.applyingRemoteByPath.add(existingPath);
-          await this.vault.delete(file);
-          this.applyingRemoteByPath.delete(existingPath);
-          this.markSelfWrite(existingPath, mtime);
+          this.applyingRemoteByPath.add(target);
+          try {
+            await this.vault.delete(file);
+          } catch {}
+          this.applyingRemoteByPath.delete(target);
+          this.markSelfWrite(target, mtime);
+        }
+        // tandai juga note lokal pemilik path itu (kalau beda ID)
+        const localOwner = this.findNoteIdByPath(target);
+        if (localOwner && localOwner !== noteId) {
+          this.index[localOwner].deleted = true;
         }
       }
       if (idx) idx.deleted = true;
@@ -960,20 +1004,39 @@ export class NoteSyncManager {
     if (existingPath !== newPath && newPath) {
       const file = this.vault.getAbstractFileByPath(existingPath);
       if (file instanceof TFile) {
-        await this.ensureParentFolders(newPath);
-        this.applyingRemoteByPath.add(newPath);
-        await this.vault.rename(file, newPath);
-        this.applyingRemoteByPath.delete(newPath);
-        const nf = this.vault.getAbstractFileByPath(newPath);
-        if (nf instanceof TFile) {
-          this.markSelfWrite(newPath, nf.stat.mtime);
-          idx.mtime = nf.stat.mtime;
+        let renameTarget = newPath;
+        if (this.vault.getAbstractFileByPath(renameTarget)) {
+          renameTarget = renameTarget.replace(
+            /(\.md)$/i,
+            " (konflik dari device lain)$1"
+          );
+          entry.doc.transact(() => {
+            entry.meta.set("path", renameTarget);
+          });
+        }
+        try {
+          await this.ensureParentFolders(renameTarget);
+          this.applyingRemoteByPath.add(renameTarget);
+          try {
+            await this.vault.rename(file, renameTarget);
+          } catch (e) {
+            console.warn("cloud-relay: rename gagal", existingPath, renameTarget, e);
+          }
+          this.applyingRemoteByPath.delete(renameTarget);
+          const nf = this.vault.getAbstractFileByPath(renameTarget);
+          if (nf instanceof TFile) {
+            this.markSelfWrite(renameTarget, nf.stat.mtime);
+            idx.mtime = nf.stat.mtime;
+          }
+          idx.path = renameTarget;
+        } catch (e) {
+          console.warn("cloud-relay: rename (folder) gagal", existingPath, newPath, e);
         }
       }
-      idx.path = newPath;
+      idx.path = idx.path || newPath;
       this.scheduleIndexWrite();
       entry.lastContent = newContent;
-      entry.lastPath = newPath;
+      entry.lastPath = idx.path;
       await this.persistNow(noteId);
       return;
     }
@@ -1069,7 +1132,7 @@ export class NoteSyncManager {
     const pathById: Record<string, string> = {};
     for (const [id, idx] of Object.entries(this.index)) {
       if (id === ATTACH_ID || id === HIDDEN_ID) continue;
-      if (!idx.deleted) {
+      if (!idx.deleted && idx.path) {
         localNoteIds.push(id);
         pathById[id] = idx.path;
       }
@@ -1115,7 +1178,7 @@ function sleep0() {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-function diffText(oldS: string, newS: string): {
+export function diffText(oldS: string, newS: string): {
   retain: number;
   del: number;
   ins: string;

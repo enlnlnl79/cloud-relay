@@ -21,7 +21,12 @@ export default class CloudRelayPlugin extends Plugin {
       try {
         prev = await this.app.vault.adapter.read(p);
       } catch {}
-      await this.app.vault.adapter.write(p, `${prev}${stamp} ${msg}\n`);
+      const lines = prev.split("\n").filter(Boolean);
+      while (lines.length > 100) lines.shift(); // jangan tumbuh tanpa batas
+      await this.app.vault.adapter.write(
+        p,
+        `${lines.join("\n")}\n${stamp} ${msg}\n`
+      );
     } catch {}
   }
 
@@ -397,23 +402,29 @@ export default class CloudRelayPlugin extends Plugin {
         if (st?.mtime) cur.set(rel, st.mtime);
       }
     } catch {}
+    const firstPoll = !this.hiddenFirstPollDone;
+    this.hiddenFirstPollDone = true;
     for (const [rel, mtime] of cur) {
       if (!prev.has(rel) || prev.get(rel) !== mtime) {
+        const isNewFile = !prev.has(rel);
         prev.set(rel, mtime);
-        if (prev.size > 1 || Date.now() - (this.hiddenWatchStarted || 0) > 6000) {
-          this.syncManager.onHiddenFileChange(rel);
+        // poll pertama = seeding baseline (jangan upload semua); setelah itu,
+        // file baru maupun mtime berubah sama-sama dilaporkan
+        if (!firstPoll || isNewFile === false) {
+          if (!firstPoll) this.syncManager.onHiddenFileChange(rel);
         }
       }
     }
     for (const rel of Array.from(prev.keys())) {
       if (!cur.has(rel)) {
         prev.delete(rel);
-        this.syncManager.onHiddenFileChange(rel, true);
+        if (!firstPoll) this.syncManager.onHiddenFileChange(rel, true);
       }
     }
   }
 
   private hiddenWatchStarted = 0;
+  private hiddenFirstPollDone = false;
 
   private stopHiddenWatcher() {
     if (this.hiddenWatcherTimer !== null) {
