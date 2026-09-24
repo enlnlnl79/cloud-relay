@@ -20,9 +20,22 @@ export function isSyncablePath(path: string): boolean {
   return path.endsWith(".md");
 }
 
-const MAX_NOTE_BYTES = 2 * 1024 * 1024;
+const ATTACH_ID = "__attachments__";
+
+interface AttachMeta {
+  sha: string;
+  size: number;
+  deleted: boolean;
+}
 
 const skipNoticeShown = new Set<string>();
+
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 const PERSIST_DEBOUNCE_MS = 3000;
 
@@ -36,6 +49,10 @@ export class NoteSyncManager {
   private applySerial: Promise<void> = Promise.resolve();
   private persistTimers = new Map<string, number>();
   private indexTimer: number | null = null;
+  private http: { baseUrl: string; token: string } | null = null;
+  private maxNoteBytes = 0;
+  private attachSeen: Record<string, { sha: string; mtime: number }> = {};
+  private attachReconcileTimer: number | null = null;
 
   constructor(
     private app: App,
@@ -43,9 +60,18 @@ export class NoteSyncManager {
     private store: SyncStore
   ) {}
 
+  setHttpTransport(http: { baseUrl: string; token: string } | null) {
+    this.http = http;
+  }
+
+  setMaxNoteBytes(n: number) {
+    this.maxNoteBytes = n;
+  }
+
   async init(showProgress = false) {
     await this.store.ensureDir();
     this.index = await this.store.readIndex();
+    this.attachSeen = await this.store.readAttachSeen();
 
     const noteIds = Object.keys(this.index);
     let j = 0;
@@ -57,11 +83,10 @@ export class NoteSyncManager {
       if (++j % 20 === 0) await sleep0();
     }
 
-    const files = this.vault
-      .getMarkdownFiles()
-      .filter((f) => isSyncablePath(f.path) && f.stat.size <= MAX_NOTE_BYTES);
+    const files = this.vault.getMarkdownFiles().filter((f) => isSyncablePath(f.path));
     let i = 0;
     for (const file of files) {
+      if (this.guardSize(file)) continue;
       let noteId = this.findNoteIdByPath(file.path);
       if (!noteId) {
         noteId = crypto.randomUUID();
@@ -93,6 +118,217 @@ export class NoteSyncManager {
       if (i % 10 === 0) await sleep0();
     }
     this.scheduleIndexWrite();
+    await this.ensureDoc(ATTACH_ID, "");
+    this.markLocallyDeletedAttachments();
+  }
+
+  private attachMap() {
+    const entry = this.docs.get(ATTACH_ID);
+    return entry
+      ? (entry.doc.getMap<AttachMeta>("files") as Y.Map<AttachMeta>)
+      : null;
+  }
+
+  private markLocallyDeletedAttachments() {
+    const map = this.attachMap();
+    if (!map) return;
+    let changed = false;
+    for (const path of Object.keys(this.attachSeen)) {
+      if (this.suspended) return;
+      if (this.vault.getAbstractFileByPath(path)) continue;
+      const entry = map.get(path);
+      if (entry && !entry.deleted) {
+        map.set(path, { ...entry, deleted: true });
+        changed = true;
+      }
+      delete this.attachSeen[path];
+    }
+    if (changed) void this.store.writeAttachSeen(this.attachSeen);
+  }
+
+  async initAttachments(showProgress = false) {
+    if (!this.http) return;
+    await this.ensureDoc(ATTACH_ID, "");
+    const map = this.attachMap();
+    if (!map) return;
+    const files = this.vault.getFiles().filter(
+      (f) => f.extension !== "md" && !this.applyingRemoteByPath.has(f.path)
+    );
+    let i = 0;
+    for (const file of files) {
+      if (this.suspended) return;
+      try {
+        const seen = this.attachSeen[file.path];
+        if (seen && seen.mtime === file.stat.mtime) {
+          const entry = map.get(file.path);
+          if (!entry || entry.sha !== seen.sha || entry.deleted) {
+            map.set(file.path, {
+              sha: seen.sha,
+              size: file.stat.size,
+              deleted: false,
+            });
+          }
+          continue;
+        }
+        const buf = await this.vault.readBinary(file);
+        const sha = await sha256Hex(buf);
+        const entry = map.get(file.path);
+        if (!entry || entry.sha !== sha || entry.deleted) {
+          await this.uploadBlob(sha, new Uint8Array(buf));
+          map.set(file.path, {
+            sha,
+            size: file.stat.size,
+            deleted: false,
+          });
+        }
+        this.attachSeen[file.path] = { sha, mtime: file.stat.mtime };
+      } catch (e) {
+        console.warn("cloud-relay: gagal siapkan lampiran", file.path, e);
+      }
+      i++;
+      if (showProgress && i % 50 === 0) {
+        new Notice(`Cloud Relay: lampiran ${i}/${files.length}…`);
+      }
+      if (i % 5 === 0) await sleep0();
+    }
+    await this.store.writeAttachSeen(this.attachSeen);
+  }
+
+  onAttachmentChange(file: TFile, deleted = false, oldPath?: string) {
+    if (this.suspended) return;
+    if (file.extension === "md") return;
+    const path = file.path;
+    if (!deleted && this.applyingRemoteByPath.has(path)) return;
+    void (async () => {
+      const map = this.attachMap();
+      if (!map) return;
+      if (oldPath && oldPath !== path) {
+        const prev = map.get(oldPath);
+        if (prev) {
+          map.delete(oldPath);
+          map.set(path, prev);
+          delete this.attachSeen[oldPath];
+        }
+      }
+      if (deleted) {
+        const prev = map.get(path);
+        if (prev && !prev.deleted) {
+          map.set(path, { ...prev, deleted: true });
+        }
+        delete this.attachSeen[path];
+      } else {
+        try {
+          const buf = await this.vault.readBinary(file);
+          const sha = await sha256Hex(buf);
+          const prev = map.get(path);
+          if (prev && prev.sha === sha && !prev.deleted) {
+            this.attachSeen[path] = { sha, mtime: file.stat.mtime };
+            return;
+          }
+          await this.uploadBlob(sha, new Uint8Array(buf));
+          map.set(path, {
+            sha,
+            size: file.stat.size,
+            deleted: false,
+          });
+          this.attachSeen[path] = { sha, mtime: file.stat.mtime };
+        } catch (e) {
+          console.warn("cloud-relay: upload lampiran gagal", path, e);
+        }
+      }
+      void this.store.writeAttachSeen(this.attachSeen);
+    })();
+  }
+
+  private async uploadBlob(sha: string, data: Uint8Array) {
+    if (!this.http) throw new Error("transport belum siap");
+    const url = `${this.http.baseUrl.replace(/\/$/, "")}/v1/blobs/${sha}?token=${encodeURIComponent(this.http.token)}`;
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: data.slice().buffer as ArrayBuffer,
+    });
+    if (!res.ok) throw new Error(`upload blob HTTP ${res.status}`);
+  }
+
+  private async downloadBlob(sha: string): Promise<ArrayBuffer> {
+    if (!this.http) throw new Error("transport belum siap");
+    const url = `${this.http.baseUrl.replace(/\/$/, "")}/v1/blobs/${sha}?token=${encodeURIComponent(this.http.token)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`download blob HTTP ${res.status}`);
+    return await res.arrayBuffer();
+  }
+
+  private scheduleAttachReconcile() {
+    if (this.attachReconcileTimer !== null)
+      window.clearTimeout(this.attachReconcileTimer);
+    this.attachReconcileTimer = window.setTimeout(() => {
+      this.attachReconcileTimer = null;
+      void this.reconcileAttachmentsFromRemote();
+    }, 800);
+  }
+
+  private async reconcileAttachmentsFromRemote() {
+    if (this.suspended) return;
+    const map = this.attachMap();
+    if (!map || !this.http) return;
+    for (const [path, meta] of map.entries()) {
+      if (this.suspended) return;
+      if (meta.deleted) {
+        if (this.attachSeen[path]) {
+          const file = this.vault.getAbstractFileByPath(path);
+          if (file instanceof TFile) {
+            this.applyingRemoteByPath.add(path);
+            try {
+              await this.vault.trash(file, true);
+            } catch {
+              try {
+                await this.vault.delete(file);
+              } catch {}
+            }
+            this.applyingRemoteByPath.delete(path);
+          }
+          delete this.attachSeen[path];
+        }
+        continue;
+      }
+      const file = this.vault.getAbstractFileByPath(path);
+      if (
+        file instanceof TFile &&
+        file.stat.size === meta.size &&
+        this.attachSeen[path]?.sha === meta.sha
+      ) {
+        continue;
+      }
+      try {
+        const buf = await this.downloadBlob(meta.sha);
+        this.applyingRemoteByPath.add(path);
+        try {
+          await this.ensureParentFolders(path);
+          if (file instanceof TFile) await this.vault.modifyBinary(file, buf);
+          else await this.vault.createBinary(path, buf);
+        } finally {
+          this.applyingRemoteByPath.delete(path);
+        }
+        this.attachSeen[path] = { sha: meta.sha, mtime: Date.now() };
+      } catch (e) {
+        console.warn("cloud-relay: gagal tarik lampiran", path, e);
+      }
+      await sleep0();
+    }
+    await this.store.writeAttachSeen(this.attachSeen);
+  }
+
+  attachmentDiagnostic(): { local: number; meta: number } {
+    const map = this.attachMap();
+    let meta = 0;
+    if (map) {
+      for (const [, v] of map.entries()) if (!v.deleted) meta++;
+    }
+    return {
+      local: this.vault.getFiles().filter((f) => f.extension !== "md").length,
+      meta,
+    };
   }
 
   setConn(conn: Conn | null) {
@@ -122,6 +358,7 @@ export class NoteSyncManager {
     for (const t of this.persistTimers.keys()) {
       await this.persistNow(t);
     }
+    await this.store.writeAttachSeen(this.attachSeen);
   }
 
   async sendSyncSteps(conn: Conn) {
@@ -157,6 +394,7 @@ export class NoteSyncManager {
       }
     }
     this.scheduleIndexWrite();
+    void this.initAttachments(false);
   }
 
   onSyncStep1(noteId: string, sv: Uint8Array) {
@@ -264,6 +502,19 @@ export class NoteSyncManager {
   private async applyRemote(noteId: string, update: Uint8Array) {
     if (this.suspended) return;
     await sleep0();
+    if (noteId === ATTACH_ID) {
+      let entry = this.docs.get(ATTACH_ID);
+      if (!entry) {
+        await this.ensureDoc(ATTACH_ID, "");
+        entry = this.docs.get(ATTACH_ID);
+      }
+      if (!entry) return;
+      entry.doc.transact(() => {
+        Y.applyUpdate(entry!.doc, update);
+      }, "remote");
+      this.scheduleAttachReconcile();
+      return;
+    }
     await this.ensureDoc(noteId, this.index[noteId]?.path ?? "");
     const entry = this.docs.get(noteId);
     if (!entry) return;
@@ -419,6 +670,7 @@ export class NoteSyncManager {
     const localNoteIds: string[] = [];
     const pathById: Record<string, string> = {};
     for (const [id, idx] of Object.entries(this.index)) {
+      if (id === ATTACH_ID) continue;
       if (!idx.deleted) {
         localNoteIds.push(id);
         pathById[id] = idx.path;
@@ -428,7 +680,8 @@ export class NoteSyncManager {
   }
 
   private guardSize(file: TFile): boolean {
-    if (file.stat.size <= MAX_NOTE_BYTES) return false;
+    if (this.maxNoteBytes <= 0) return false;
+    if (file.stat.size <= this.maxNoteBytes) return false;
     if (!skipNoticeShown.has(file.path)) {
       skipNoticeShown.add(file.path);
       new Notice(

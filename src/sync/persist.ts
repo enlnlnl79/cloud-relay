@@ -54,6 +54,23 @@ export class SyncStore {
     );
   }
 
+  async readAttachSeen(): Promise<Record<string, { sha: string; mtime: number }>> {
+    const path = `${this.dir}/attach-seen.json`;
+    if (!(await this.adapter.exists(path))) return {};
+    try {
+      return JSON.parse(await this.adapter.read(path));
+    } catch {
+      return {};
+    }
+  }
+
+  async writeAttachSeen(seen: Record<string, { sha: string; mtime: number }>) {
+    await this.adapter.write(
+      `${this.dir}/attach-seen.json`,
+      JSON.stringify(seen, null, 2)
+    );
+  }
+
   async archive() {
     if (await this.adapter.exists(this.dir)) {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);

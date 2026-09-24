@@ -364,6 +364,20 @@ export class CloudRelaySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Batas ukuran catatan (MB)")
+      .setDesc("Catatan lebih besar dari ini dilewati. 0 = tanpa batas (semua catatan ikut sync).")
+      .addText((text) =>
+        text
+          .setValue(`${this.plugin.settings.maxNoteMB ?? 0}`)
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            this.plugin.settings.maxNoteMB = isNaN(n) ? 0 : Math.max(0, n);
+            await this.plugin.saveSettings();
+            this.plugin.applyLimits();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Cek sinkronisasi")
       .setDesc("Bandingkan jumlah file di vault, yang terdaftar di sync, dan yang ada di server.")
       .addButton((btn) =>
@@ -383,8 +397,9 @@ export class CloudRelaySettingTab extends PluginSettingTab {
             .slice(0, 3)
             .map((f) => f.path)
             .join(", ");
+          const attach = this.plugin.attachmentDiagnostic();
           new Notice(
-            `Cloud Relay — vault: ${vaultFiles.length}, terdaftar: ${local.localNoteIds.length}, server: ${serverCount}, belum terdaftar: ${belumTerdaftar.length}${sampel ? ` (${sampel}…)` : ""}, belum terkirim: ${belumTerkirim.length}, belum diterima: ${belumDiterima.length}`,
+            `Cloud Relay — catatan: vault ${vaultFiles.length}, terdaftar ${local.localNoteIds.length}, server ${serverCount}, belum terdaftar ${belumTerdaftar.length}${sampel ? ` (${sampel}…)` : ""}, belum terkirim ${belumTerkirim.length}, belum diterima ${belumDiterima.length} | lampiran: lokal ${attach.local}, meta ${attach.meta}`,
             12000
           );
           this.display();

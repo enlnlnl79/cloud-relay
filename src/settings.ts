@@ -5,6 +5,7 @@ export interface CloudRelaySettings {
   adminToken: string;
   isPrimary: boolean;
   enabled: boolean;
+  maxNoteMB: number;
 }
 
 export const DEFAULT_SETTINGS: CloudRelaySettings = {
@@ -14,6 +15,7 @@ export const DEFAULT_SETTINGS: CloudRelaySettings = {
   adminToken: "",
   isPrimary: false,
   enabled: false,
+  maxNoteMB: 0,
 };
 
 export function parseInviteLink(

@@ -54,29 +54,39 @@ export default class CloudRelayPlugin extends Plugin {
 
     this.registerEvent(
       this.app.vault.on("create", (file) => {
-        if (file instanceof TFile && file.extension === "md") {
-          this.app.vault.read(file).then((content) => manager.onFileCreate(file, content));
+        if (file instanceof TFile) {
+          if (file.extension === "md") {
+            this.app.vault.read(file).then((content) => manager.onFileCreate(file, content));
+          } else {
+            manager.onAttachmentChange(file);
+          }
         }
       })
     );
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile && file.extension === "md") {
-          this.app.vault.read(file).then((content) => manager.onFileModify(file, content));
+        if (file instanceof TFile) {
+          if (file.extension === "md") {
+            this.app.vault.read(file).then((content) => manager.onFileModify(file, content));
+          } else {
+            manager.onAttachmentChange(file);
+          }
         }
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (file instanceof TFile && file.extension === "md") {
-          manager.onFileDelete(file);
+        if (file instanceof TFile) {
+          if (file.extension === "md") manager.onFileDelete(file);
+          else manager.onAttachmentChange(file, true);
         }
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (file instanceof TFile && file.extension === "md") {
-          manager.onFileRename(file, oldPath);
+        if (file instanceof TFile) {
+          if (file.extension === "md") manager.onFileRename(file, oldPath);
+          else manager.onAttachmentChange(file, false, oldPath);
         }
       })
     );
@@ -134,7 +144,7 @@ export default class CloudRelayPlugin extends Plugin {
   }
 
   async wipeLocalVault(): Promise<{ moved: number; failed: number }> {
-    const files = this.app.vault.getMarkdownFiles();
+    const files = this.app.vault.getFiles();
     let moved = 0;
     let failed = 0;
     for (const file of files) {
@@ -190,6 +200,10 @@ export default class CloudRelayPlugin extends Plugin {
     return this.syncManager?.diagnostic() ?? { localNoteIds: [], pathById: {} };
   }
 
+  attachmentDiagnostic() {
+    return this.syncManager?.attachmentDiagnostic() ?? { local: 0, meta: 0 };
+  }
+
   private scanning = false;
 
   async rescanVault() {
@@ -225,8 +239,17 @@ export default class CloudRelayPlugin extends Plugin {
     await this.syncManager?.reset();
   }
 
+  applyLimits() {
+    this.syncManager?.setMaxNoteBytes((this.settings.maxNoteMB || 0) * 1024 * 1024);
+  }
+
   startSync() {
     if (!this.syncManager) return;
+    this.syncManager.setHttpTransport({
+      baseUrl: this.settings.serverUrl,
+      token: this.settings.vaultToken,
+    });
+    this.applyLimits();
     this.connection = new RelayConnection(
       (status) => this.statusBar?.set(status),
       {
