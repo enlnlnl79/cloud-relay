@@ -2,6 +2,8 @@
 
 Plugin Obsidian untuk sinkronisasi vault antar device via DB Cloud Relay. Live per kata, offline aman tanpa konflik.
 
+> **Melanjutkan pengembangan?** Baca [`DEVELOPMENT.md`](DEVELOPMENT.md) — arsitektur, protokol, invariants anti-korupsi, workflow rilis, dan roadmap.
+
 ## Dev
 
 ```bash
