@@ -49,9 +49,12 @@ export class CloudRelaySettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "Cloud Relay" });
     containerEl.createEl("p", {
       text: `Versi plugin: ${this.plugin.manifest.version}`,
+      cls: "cloud-relay-version",
     });
+    this.renderIntro(containerEl);
 
     const other = this.otherSyncPluginActive();
+    
     if (other) {
       containerEl.createEl("p", {
         text: `⚠️ ${other} terdeteksi aktif di vault ini. Matikan dulu (Settings → Community Plugins) — dua plugin sync berjalan bersamaan akan saling bentrok (file kembali setelah dihapus, note terduplikat).`,
@@ -100,6 +103,21 @@ export class CloudRelaySettingTab extends PluginSettingTab {
         this.display();
       })
     );
+  }
+
+  private renderIntro(containerEl: HTMLElement) {
+    const card = containerEl.createDiv({ cls: "cloud-relay-intro" });
+    card.createEl("h3", { text: "Sinkronisasi vault antar-device" });
+    card.createEl("p", { text: "Cloud Relay menjaga catatan, lampiran, tema, dan pengaturan Obsidian tetap sama di Mac, HP, dan device lain." });
+    const list = card.createEl("ul");
+    list.createEl("li", { text: "Perubahan teks dikirim realtime dan digabung aman saat offline." });
+    list.createEl("li", { text: "Server milikmu menyimpan salinan vault; tidak perlu akun." });
+    list.createEl("li", { text: "Device pertama menjadi sumber pertama; device berikutnya mengikuti lewat invite link." });
+    const help = card.createEl("details");
+    help.createEl("summary", { text: "Cara menyiapkan server" });
+    help.createEl("p", { text: "Di server Linux: clone repo DB Cloud Relay, jalankan Docker Compose, lalu arahkan Cloudflare Tunnel ke port 1111." });
+    help.createEl("code", { text: "git clone https://github.com/enlnlnl79/db-cloud-relay.git && cd db-cloud-relay && docker compose up -d" });
+    help.createEl("p", { text: "Ambil ADMIN_TOKEN dari docker compose logs. Device pertama membutuhkan token itu sekali; device lain cukup invite link." });
   }
 
   private renderRoleStep(containerEl: HTMLElement) {

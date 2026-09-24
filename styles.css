@@ -9,9 +9,54 @@
   color: var(--text-error);
 }
 
+.cloud-relay-version {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-top: -0.5em;
+}
+
+.cloud-relay-intro {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  padding: var(--size-4-4);
+  margin: var(--size-4-4) 0 var(--size-4-6);
+  line-height: var(--line-height-normal);
+}
+
+.cloud-relay-intro h3 {
+  margin: 0 0 var(--size-4-1);
+}
+
+.cloud-relay-intro p:last-child {
+  margin-bottom: 0;
+}
+
+.cloud-relay-intro details {
+  margin-top: var(--size-4-3);
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: var(--size-4-3);
+}
+
+.cloud-relay-intro summary {
+  cursor: pointer;
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+}
+
+.cloud-relay-intro code {
+  display: block;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  background: var(--code-background);
+  border-radius: var(--radius-s);
+  padding: var(--size-4-2);
+  font-size: var(--font-smaller);
+}
+
 .cloud-relay-warning {
   color: var(--text-error);
   border: 1px solid var(--text-error);
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-radius: var(--radius-m);
+  padding: var(--size-4-2) var(--size-4-3);
 }

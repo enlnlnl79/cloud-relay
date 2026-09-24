@@ -272,7 +272,6 @@ async function waitFor(desc, fn, ms = 8000) {
     const f = A.vault.getAbstractFileByPath("hapus-saya.md");
     A.manager.onFileCreate(f, "akan dihapus");
     const t = await waitFor("file sampai B", () => B.vault.adapter.files.has("hapus-saya.md"), 6000).then(() => true).catch(() => false);
-    console.log("      [debug] create sampai B:", t);
 
     const fa = A.vault.getAbstractFileByPath("hapus-saya.md");
     await A.vault.delete(fa);

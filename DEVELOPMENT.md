@@ -174,7 +174,29 @@ styles/manifest rapi, README).
 5. Scan duplikasi cepat: potongan tengah file tidak boleh muncul ≥3×.
 6. Tes tombol Pulihkan dari server di device kedua (hasil identik).
 
-## 8. Pitfall yang Pernah Terjadi (jangan ulangi)
+## 8. UI/UX & Onboarding
+
+Settings tidak boleh mengasumsikan pengguna memahami CRDT, token, Docker, atau
+invite. Halaman terhubung menampilkan status vault, sumber pertama/pengikut,
+status sync, dan opsi berbahaya yang tersembunyi + klik dua kali.
+
+Wizard onboarding:
+
+1. **Peran device** — Device pertama atau Device lain (gabung).
+2. **Server URL** (device pertama) — alamat dasar server, tanpa `/v1` dan
+   tanpa `/sync` (contoh format ditampilkan, bukan domain author).
+3. **Admin token** (device pertama) — kunci dari `docker compose logs`; hanya
+   dipakai untuk membuat vault.
+4. **Invite link** (device lain) — server URL + vault ID + vault token.
+5. **Tes koneksi sebelum join** — tampilkan jumlah catatan dan waktu update.
+6. **Vault tidak kosong** — pilihan eksplisit: "Ikuti device pertama (ganti
+   total)" atau "Gabungkan"; opsi ganti total memperingatkan backup manual.
+
+Intro settings menjelaskan fungsi plugin, model server self-hosted, perintah
+Docker, dan perbedaan sumber pertama/pengikut secara progresif. Jangan mengganti
+copy onboarding tanpa memperbarui test E2E `e2e-join.mjs`.
+
+## 9. Pitfall yang Pernah Terjadi (jangan ulangi)
 
 | Gejala | Sebab | Solusi |
 |---|---|---|
