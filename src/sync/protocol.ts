@@ -2,6 +2,8 @@ export const MSG_DOC_LIST = 0;
 export const MSG_SYNC_STEP1 = 1;
 export const MSG_SYNC_STEP2 = 2;
 export const MSG_UPDATE = 3;
+export const MSG_PING = 254;
+export const MSG_PONG = 255;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

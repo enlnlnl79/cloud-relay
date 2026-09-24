@@ -13,16 +13,35 @@ export default class CloudRelayPlugin extends Plugin {
   private syncManager: NoteSyncManager | null = null;
   private store: SyncStore | null = null;
 
+  private async bootLog(msg: string) {
+    try {
+      const p = `${this.manifest.dir}/boot.log`;
+      const stamp = new Date().toISOString();
+      let prev = "";
+      try {
+        prev = await this.app.vault.adapter.read(p);
+      } catch {}
+      await this.app.vault.adapter.write(p, `${prev}${stamp} ${msg}\n`);
+    } catch {}
+  }
+
   async onload() {
     await this.loadSettings();
+    await this.bootLog("onload start");
 
     this.statusBar = new StatusBar(this.addStatusBarItem());
     this.store = new SyncStore(this.app.vault.adapter, `${this.manifest.dir}/sync`);
     this.syncManager = new NoteSyncManager(this.app, this.app.vault, this.store);
 
-    await this.syncManager.init();
+    try {
+      await this.syncManager.init();
+      await this.bootLog("init selesai");
+    } catch (e) {
+      await this.bootLog(`init ERROR: ${e}`);
+    }
 
     this.registerVaultEvents();
+    await this.bootLog("events terpasang");
 
     this.addRibbonIcon("refresh-cw", "Cloud Relay: sync sekarang", () => {
       if (this.connection && this.syncManager) {

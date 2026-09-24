@@ -2,6 +2,8 @@ import {
   decodeFrame,
   encodeFrame,
   MSG_DOC_LIST,
+  MSG_PING,
+  MSG_PONG,
   MSG_SYNC_STEP1,
   MSG_SYNC_STEP2,
   MSG_UPDATE,
@@ -18,14 +20,21 @@ export interface ConnectionHandlers {
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const PING_INTERVAL_MS = 15000;
+const STALE_THRESHOLD_MS = 35000;
 
 export class RelayConnection {
   private ws: WebSocket | null = null;
   private reconnectDelay = RECONNECT_MIN_MS;
   private reconnectTimer: number | null = null;
+  private pingTimer: number | null = null;
+  private watchdogTimer: number | null = null;
+  private lastMessageAt = 0;
   private closedByUser = false;
   private onStatus: (status: SyncStatus) => void;
   private handlers: ConnectionHandlers;
+  private current: { serverUrl: string; vaultId: string; token: string } | null =
+    null;
 
   constructor(
     onStatus: (status: SyncStatus) => void,
@@ -37,6 +46,7 @@ export class RelayConnection {
 
   connect(serverUrl: string, vaultId: string, token: string) {
     this.closedByUser = false;
+    this.current = { serverUrl, vaultId, token };
     this.teardown();
     this.onStatus("connecting");
 
@@ -44,16 +54,20 @@ export class RelayConnection {
     const url = `${wsUrl}/sync/${vaultId}?token=${encodeURIComponent(token)}`;
     this.ws = new WebSocket(url);
     this.ws.binaryType = "arraybuffer";
+    this.lastMessageAt = Date.now();
 
     this.ws.onopen = () => {
       this.reconnectDelay = RECONNECT_MIN_MS;
       this.onStatus("synced");
+      this.startHeartbeat();
     };
 
     this.ws.onmessage = (event) => {
+      this.lastMessageAt = Date.now();
       if (!(event.data instanceof ArrayBuffer)) return;
       const frame = decodeFrame(new Uint8Array(event.data));
       if (!frame) return;
+      if (frame.type === MSG_PONG) return;
       switch (frame.type) {
         case MSG_DOC_LIST:
           this.handlers.onDocList(parseDocList(frame.payload));
@@ -71,6 +85,7 @@ export class RelayConnection {
     };
 
     this.ws.onclose = () => {
+      this.stopHeartbeat();
       this.ws = null;
       if (this.closedByUser) {
         this.onStatus("disconnected");
@@ -85,8 +100,37 @@ export class RelayConnection {
 
   disconnect() {
     this.closedByUser = true;
+    this.current = null;
     this.teardown();
+    this.stopHeartbeat();
     this.onStatus("disconnected");
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    this.pingTimer = window.setInterval(() => {
+      this.send(encodeFrame(MSG_PING, "", new Uint8Array(0)));
+    }, PING_INTERVAL_MS);
+    this.watchdogTimer = window.setInterval(() => {
+      if (Date.now() - this.lastMessageAt > STALE_THRESHOLD_MS) {
+        console.warn("cloud-relay: koneksi zombie terdeteksi, reconnect paksa");
+        if (this.current) {
+          const { serverUrl, vaultId, token } = this.current;
+          this.connect(serverUrl, vaultId, token);
+        }
+      }
+    }, PING_INTERVAL_MS);
+  }
+
+  private stopHeartbeat() {
+    if (this.pingTimer !== null) {
+      window.clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.watchdogTimer !== null) {
+      window.clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
   }
 
   send(frame: Uint8Array) {
