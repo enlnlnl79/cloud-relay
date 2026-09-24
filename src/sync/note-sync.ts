@@ -66,6 +66,7 @@ export class NoteSyncManager {
   private applyingRemoteByPath = new Set<string>();
   private conn: Conn | null = null;
   private suspended = false;
+  private pendingPush = new Set<string>();
   private applySerial: Promise<void> = Promise.resolve();
   private persistTimers = new Map<string, number>();
   private indexTimer: number | null = null;
@@ -660,8 +661,24 @@ export class NoteSyncManager {
     this.conn = conn;
     if (conn) {
       this.startFlushLoop();
+      // push note yang dibuat/diubah saat belum connect
+      void this.flushPendingPush(conn);
     } else {
       this.stopFlushLoop();
+    }
+  }
+
+  async flushPendingPush(conn: Conn) {
+    if (this.pendingPush.size === 0) return;
+    const ids = Array.from(this.pendingPush);
+    this.pendingPush.clear();
+    for (const id of ids) {
+      if (this.index[id]?.deleted) continue;
+      await this.ensureDoc(id, this.index[id]?.path ?? "");
+      const entry = this.docs.get(id);
+      if (!entry) continue;
+      const update = Y.encodeStateAsUpdate(entry.doc);
+      conn.send(encodeFrame(MSG_UPDATE, id, update));
     }
   }
 
@@ -799,26 +816,35 @@ export class NoteSyncManager {
     if (this.applyingRemoteByPath.has(file.path)) return;
     if (this.guardSize(file)) return;
     let noteId = this.findNoteIdByPath(file.path);
+    let wasKnown = true;
     if (!noteId) {
       noteId = crypto.randomUUID();
       this.index[noteId] = { path: file.path, deleted: false, mtime: 0 };
+      wasKnown = false;
     }
     const id = noteId;
+    const isNewNote = !wasKnown;
     this.index[id].mtime = file.stat.mtime;
     this.scheduleIndexWrite();
     void (async () => {
       await this.ensureDoc(id, file.path);
       const entry = this.docs.get(id);
-      if (!entry || content === entry.lastContent) return;
+      if (!entry) return;
+      if (content === entry.lastContent) {
+        this.pushFullStateIfUnknown(id);
+        return;
+      }
       const idx = this.index[id];
       if (
+        !isNewNote &&
         entry.lastContent.length === 0 &&
         content.length > 0 &&
         idx &&
         idx.mtime !== 0
       ) {
         // doc lokal tertinggal (blob stale) — tunggu sync dari server,
-        // jangan insert ulang isi (duplikasi CRDT)
+        // jangan insert ulang isi (duplikasi CRDT).
+        // (isNewNote tidak boleh masuk sini: doc baru memang belum ada history)
         idx.mtime = file.stat.mtime;
         this.scheduleIndexWrite();
         return;
@@ -827,12 +853,18 @@ export class NoteSyncManager {
       entry.doc.transact(() => {
         if (d.del > 0) entry.text.delete(d.retain, d.del);
         if (d.ins.length > 0) entry.text.insert(d.retain, d.ins);
-        entry.meta.set("path", file.path);
-        entry.meta.set("deleted", false);
+        // jangan set meta nilainya sama — bug Yjs 13.6.x (update apply kosong)
+        if (entry.meta.get("path") !== file.path) entry.meta.set("path", file.path);
+        if (entry.meta.get("deleted") !== false) entry.meta.set("deleted", false);
       });
       entry.lastContent = content;
       entry.lastPath = file.path;
     })();
+  }
+
+  private pushFullStateIfUnknown(noteId: string) {
+    void this.flushPendingPush(this.conn!);
+    void noteId;
   }
 
   onFileCreate(file: TFile, content: string) {
@@ -1081,7 +1113,17 @@ export class NoteSyncManager {
     }
     doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin !== "remote") {
-        this.conn?.send(encodeFrame(MSG_UPDATE, noteId, new Uint8Array(update)));
+        if (this.conn) {
+          // BUG Yjs 13.6.x: update inkremental dari transact yang menyet
+          // ulang meta (nilai sama) setelah init-transact menghasilkan update
+          // yang apply-nya kosong. Solusi: kirim STATE PENUH — selalu valid,
+          // idempotent di server (yrs merge).
+          const full = Y.encodeStateAsUpdate(entry.doc);
+          this.conn.send(encodeFrame(MSG_UPDATE, noteId, new Uint8Array(full)));
+        } else {
+          // belum connect — tandai, akan di-push penuh setelah connect
+          this.pendingPush.add(noteId);
+        }
       }
       this.persistDoc(noteId);
     });

@@ -150,12 +150,12 @@ export class RelayConnection {
 
   send(frame: Uint8Array) {
     const ws = this.ws;
-    if (!ws) return;
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(frame);
       this.handlers.onSent?.(1);
-    } else if (ws.readyState === WebSocket.CONNECTING) {
-      // tahan frame; akan diflush saat open (update tidak hilang di celah reconnect)
+    } else if (!ws || ws.readyState === WebSocket.CONNECTING) {
+      // belum connect / sedang connect: tahan frame, flush saat open
+      // (update tidak boleh hilang hanya karena dibuat sebelum koneksi)
       if (this.outgoing.length < OUTGOING_BUFFER_MAX) {
         this.outgoing.push(frame);
       }

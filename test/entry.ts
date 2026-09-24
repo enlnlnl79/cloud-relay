@@ -19,3 +19,5 @@ export {
 };
 export { diffText } from "../src/sync/note-sync";
 export { MockVault, MockAdapter } from "./mock-vault";
+export { RelayConnection } from "../src/sync/connection";
+export * as Y from "yjs";
