@@ -8903,6 +8903,8 @@ var NoteSyncManager = class {
     this.attachSeen = {};
     this.attachReconcileTimer = null;
     this.flushTimer = null;
+    this.localDirty = /* @__PURE__ */ new Set();
+    this.conflictHandler = null;
     this.hiddenSyncEnabled = false;
     this.hiddenSeen = {};
     this.hiddenReconcileTimer = null;
@@ -8910,6 +8912,9 @@ var NoteSyncManager = class {
     this.attachmentsInitRunning = false;
     this.attachmentsInitPending = false;
     this.applyQueueDepth = 0;
+  }
+  setConflictHandler(handler) {
+    this.conflictHandler = handler;
   }
   markSelfWrite(path, mtime) {
     this.selfWrites.set(path, { mtime, until: Date.now() + 5e3 });
@@ -9688,6 +9693,7 @@ var NoteSyncManager = class {
       });
       entry.lastContent = content;
       entry.lastPath = file.path;
+      this.localDirty.add(id2);
     })();
   }
   pushFullStateIfUnknown(noteId) {
@@ -9751,6 +9757,35 @@ var NoteSyncManager = class {
       entry.lastPath = file.path;
     })();
   }
+  async resolveConflict(noteId, choice, local, remote) {
+    const entry = this.docs.get(noteId);
+    if (!entry) return;
+    const content = choice === "local" ? local : choice === "remote" ? remote : `${local}
+
+--- Cloud Relay: versi remote ---
+
+${remote}`;
+    entry.doc.transact(() => {
+      if (entry.text.length > 0) entry.text.delete(0, entry.text.length);
+      if (content) entry.text.insert(0, content);
+      entry.meta.set("deleted", false);
+    });
+    entry.lastContent = content;
+    this.localDirty.delete(noteId);
+    const idx = this.index[noteId];
+    if (idx?.path) {
+      const file = this.vault.getAbstractFileByPath(idx.path);
+      if (file instanceof TFile) {
+        this.applyingRemoteByPath.add(idx.path);
+        await this.vault.modify(file, content);
+        this.applyingRemoteByPath.delete(idx.path);
+      } else {
+        await this.ensureParentFolders(idx.path);
+        await this.vault.create(idx.path, content);
+      }
+    }
+    await this.persistNow(noteId);
+  }
   async applyRemote(noteId, update) {
     if (this.suspended) return;
     await sleep0();
@@ -9805,6 +9840,16 @@ var NoteSyncManager = class {
     const deleted = entry.meta.get("deleted") ?? false;
     const idx = this.index[noteId];
     const existingPath = idx?.path ?? "";
+    if (this.localDirty.has(noteId) && (newContent !== oldContent || deleted)) {
+      this.conflictHandler?.({
+        noteId,
+        path: existingPath || newPath,
+        local: oldContent,
+        remote: deleted ? "" : newContent,
+        deleted
+      });
+      return;
+    }
     if (deleted) {
       const target = existingPath || newPath;
       if (target) {

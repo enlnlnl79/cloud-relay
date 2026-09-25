@@ -5,6 +5,7 @@ import { RelayConnection } from "./sync/connection";
 import { NoteSyncManager } from "./sync/note-sync";
 import { SyncStore } from "./sync/persist";
 import { CloudRelaySettingTab } from "./ui/settings-tab";
+import { ConflictModal } from "./ui/conflict-modal";
 
 export default class CloudRelayPlugin extends Plugin {
   settings: CloudRelaySettings = DEFAULT_SETTINGS;
@@ -37,6 +38,11 @@ export default class CloudRelayPlugin extends Plugin {
     this.statusBar = new StatusBar(this.addStatusBarItem());
     this.store = new SyncStore(this.app.vault.adapter, `${this.manifest.dir}/sync`);
     this.syncManager = new NoteSyncManager(this.app, this.app.vault, this.store);
+    this.syncManager.setConflictHandler((data) => {
+      new ConflictModal(this.app, data, (choice) => {
+        void this.syncManager?.resolveConflict(data.noteId, choice, data.local, data.remote);
+      }).open();
+    });
 
     try {
       await this.syncManager.init();

@@ -77,6 +77,12 @@ export class NoteSyncManager {
   private attachSeen: Record<string, { sha: string; mtime: number }> = {};
   private attachReconcileTimer: number | null = null;
   private flushTimer: number | null = null;
+  private localDirty = new Set<string>();
+  private conflictHandler: ((data: { noteId: string; path: string; local: string; remote: string; deleted: boolean }) => void) | null = null;
+
+  setConflictHandler(handler: (data: { noteId: string; path: string; local: string; remote: string; deleted: boolean }) => void) {
+    this.conflictHandler = handler;
+  }
 
   private markSelfWrite(path: string, mtime: number) {
     this.selfWrites.set(path, { mtime, until: Date.now() + 5000 });
@@ -936,6 +942,7 @@ export class NoteSyncManager {
       });
       entry.lastContent = content;
       entry.lastPath = file.path;
+      this.localDirty.add(id);
     })();
   }
 
@@ -1009,6 +1016,36 @@ export class NoteSyncManager {
     })();
   }
 
+  async resolveConflict(noteId: string, choice: "local" | "remote" | "merge", local: string, remote: string) {
+    const entry = this.docs.get(noteId);
+    if (!entry) return;
+    const content = choice === "local"
+      ? local
+      : choice === "remote"
+        ? remote
+        : `${local}\n\n--- Cloud Relay: versi remote ---\n\n${remote}`;
+    entry.doc.transact(() => {
+      if (entry.text.length > 0) entry.text.delete(0, entry.text.length);
+      if (content) entry.text.insert(0, content);
+      entry.meta.set("deleted", false);
+    });
+    entry.lastContent = content;
+    this.localDirty.delete(noteId);
+    const idx = this.index[noteId];
+    if (idx?.path) {
+      const file = this.vault.getAbstractFileByPath(idx.path);
+      if (file instanceof TFile) {
+        this.applyingRemoteByPath.add(idx.path);
+        await this.vault.modify(file, content);
+        this.applyingRemoteByPath.delete(idx.path);
+      } else {
+        await this.ensureParentFolders(idx.path);
+        await this.vault.create(idx.path, content);
+      }
+    }
+    await this.persistNow(noteId);
+  }
+
   private async applyRemote(noteId: string, update: Uint8Array) {
     if (this.suspended) return;
     await sleep0();
@@ -1062,6 +1099,17 @@ export class NoteSyncManager {
 
     const idx = this.index[noteId];
     const existingPath = idx?.path ?? "";
+
+    if (this.localDirty.has(noteId) && (newContent !== oldContent || deleted)) {
+      this.conflictHandler?.({
+        noteId,
+        path: existingPath || newPath,
+        local: oldContent,
+        remote: deleted ? "" : newContent,
+        deleted,
+      });
+      return;
+    }
 
     if (deleted) {
       // target: path index lokal, fallback ke path remote (note ID bisa beda
