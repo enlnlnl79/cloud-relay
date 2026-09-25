@@ -107,17 +107,36 @@ export class CloudRelaySettingTab extends PluginSettingTab {
 
   private renderIntro(containerEl: HTMLElement) {
     const card = containerEl.createDiv({ cls: "cloud-relay-intro" });
-    card.createEl("h3", { text: "Sinkronisasi vault antar-device" });
-    card.createEl("p", { text: "Cloud Relay menjaga catatan, lampiran, tema, dan pengaturan Obsidian tetap sama di Mac, HP, dan device lain." });
-    const list = card.createEl("ul");
-    list.createEl("li", { text: "Perubahan teks dikirim realtime dan digabung aman saat offline." });
-    list.createEl("li", { text: "Server milikmu menyimpan salinan vault; tidak perlu akun." });
-    list.createEl("li", { text: "Device pertama menjadi sumber pertama; device berikutnya mengikuti lewat invite link." });
-    const help = card.createEl("details");
-    help.createEl("summary", { text: "Cara menyiapkan server" });
-    help.createEl("p", { text: "Di server Linux: clone repo DB Cloud Relay, jalankan Docker Compose, lalu arahkan Cloudflare Tunnel ke port 1111." });
-    help.createEl("code", { text: "git clone https://github.com/enlnlnl79/db-cloud-relay.git && cd db-cloud-relay && docker compose up -d" });
-    help.createEl("p", { text: "Ambil ADMIN_TOKEN dari docker compose logs. Device pertama membutuhkan token itu sekali; device lain cukup invite link." });
+    card.createEl("h3", { text: "Apa itu Cloud Relay?" });
+    card.createEl("p", { text: "Cloud Relay adalah plugin sinkronisasi vault Obsidian antar-device. Catatan, lampiran, folder, tema, dan pengaturan yang dipilih dapat dibuat sama di Mac, HP, dan device lain." });
+
+    const how = card.createEl("details", { attr: { open: "true" } });
+    how.createEl("summary", { text: "Cara kerjanya" });
+    const howList = how.createEl("ul");
+    howList.createEl("li", { text: "Saat kamu mengetik, plugin mengirim perubahan kecil secara realtime melalui WebSocket." });
+    howList.createEl("li", { text: "DB Cloud Relay menyimpan hasil terbaru vault dan meneruskannya ke device lain." });
+    howList.createEl("li", { text: "Saat offline, device tetap bisa digunakan. Perubahan akan disatukan saat internet kembali." });
+    howList.createEl("li", { text: "Server tidak mengirim seluruh file setiap kali; device hanya bertukar perubahan yang belum dimiliki." });
+
+    const server = card.createEl("details");
+    server.createEl("summary", { text: "Cara menyiapkan server" });
+    server.createEl("p", { text: "DB Cloud Relay berjalan di server pribadi menggunakan Docker. Cloudflare Tunnel dapat mengubah port lokal menjadi URL yang bisa diakses device." });
+    server.createEl("code", { text: "git clone https://github.com/enlnlnl79/db-cloud-relay.git\ncd db-cloud-relay\ndocker compose up -d" });
+    server.createEl("p", { text: "Setelah server aktif, arahkan Cloudflare Tunnel ke localhost:1111. Ambil ADMIN_TOKEN dari docker compose logs. Token ini hanya dibutuhkan device pertama untuk membuat vault." });
+
+    const join = card.createEl("details");
+    join.createEl("summary", { text: "Cara menghubungkan device" });
+    const steps = join.createEl("ol");
+    for (const text of [
+      "Device pertama memilih Device pertama, memasukkan Server URL dan ADMIN_TOKEN, lalu membuat sync vault.",
+      "Setelah berhasil, device pertama membagikan invite link.",
+      "Device berikutnya memilih Device lain (gabung), menempel invite link, lalu mengecek jumlah catatan dan waktu update server.",
+      "Untuk membuat vault 100% sama dengan device pertama, pilih Ikuti device pertama (ganti total).",
+    ]) steps.createEl("li", { text });
+
+    const meaning = card.createEl("p", { cls: "cloud-relay-intro-note" });
+    meaning.createEl("strong", { text: "Sumber pertama: " });
+    meaning.appendText("device yang pertama membuat vault dan menjadi acuan awal. Device lain disebut pengikut, tetapi tetap dapat melakukan edit dan menjadi sumber perubahan berikutnya.");
   }
 
   private renderRoleStep(containerEl: HTMLElement) {

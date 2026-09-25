@@ -1,7 +1,7 @@
 {
   "id": "cloud-relay",
   "name": "Cloud Relay",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "minAppVersion": "1.5.0",
   "description": "Sinkronisasi vault antar device via server self-hosted. Live per kata, offline aman, tanpa konflik.",
   "author": "enl",
